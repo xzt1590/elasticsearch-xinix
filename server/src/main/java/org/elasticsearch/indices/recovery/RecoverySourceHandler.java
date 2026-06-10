@@ -158,7 +158,7 @@ public class RecoverySourceHandler {
      */
     public void recoverToTarget(ActionListener<RecoveryResponse> listener) {
         addListener(listener);
-        final Closeable releaseResources = () -> IOUtils.close(resources);
+        final Closeable releaseResources = () -> IOUtils.close(resources); // 提前准备资源释放
         try {
             cancellableThreads.setOnCancel((reason, beforeCancelEx) -> {
                 final RuntimeException e;
@@ -196,6 +196,7 @@ public class RecoverySourceHandler {
             },
                 shard,
                 cancellableThreads,
+                    // 核心流程在这里
                 ActionListener.wrap((RetentionLease retentionLease) -> recoverToTarget(retentionLease, onFailure), onFailure)
             );
         } catch (Exception e) {
@@ -203,13 +204,31 @@ public class RecoverySourceHandler {
         }
     }
 
+    /**
+     *整体执行链回顾：
+     *   recoverToTarget
+     *     ├── phase1: 传 segment 文件（或跳过）
+     *     ├── prepareTargetForTranslog: 副本打开 Engine
+     *     ├── initiateTracking: 副本加入 replication group（开始接收实时写入）
+     *     ├── phase2: 传历史操作（startingSeqNo ~ maxSeqNo）
+     *     └── finalizeRecovery:
+     *          ├── markAllocationIdAsInSync（副本纳入 global checkpoint 计算）
+     *          ├── finalizeRecovery 请求（副本裁 translog、更新 GCP、转 STARTED）
+     *          ├── updateGlobalCheckpointForShard（主分片记录副本 GCP）
+     *          └── [如果 primary relocation] hand-off 主权
+     *
+     *   一个关键的时序问题：为什么 initiateTracking（line 315）在 phase2 之前？
+     *   因为从 initiateTracking 那一刻起，新写入的文档会通过正常的 replication 机制同步到这个副本。
+     *   而 phase2 传的是 startingSeqNo ~ 当时的 maxSeqNo 之间的历史操作。两者可能重叠（副本会自动去重，靠 seqNo 幂等），但不会遗漏。
+     *   如果先 phase2 再 initiateTracking，中间的空档期写入的文档就丢了。
+     */
     private void recoverToTarget(RetentionLease retentionLease, Consumer<Exception> onFailure) throws IOException {
         final Closeable retentionLock = shard.acquireHistoryRetentionLock();
         resources.add(retentionLock);
         final long startingSeqNo;
-        final boolean isSequenceNumberBasedRecovery = request.startingSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO
-            && isTargetSameHistory()
-            && shard.hasCompleteHistoryOperations("peer-recovery", request.startingSeqNo())
+        final boolean isSequenceNumberBasedRecovery = request.startingSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO // 保证副本本地有数据
+            && isTargetSameHistory() // 同一条历史线
+            && shard.hasCompleteHistoryOperations("peer-recovery", request.startingSeqNo()) // 主分片保留了从从 startingSeqNo 开始的所有历史
             && ((retentionLease == null && shard.useRetentionLeasesInPeerRecovery() == false)
                 || (retentionLease != null && retentionLease.retainingSequenceNumber() <= request.startingSeqNo()));
         // NB check hasCompleteHistoryOperations when computing isSequenceNumberBasedRecovery, even if there is a retention lease,
@@ -237,18 +256,18 @@ public class RecoverySourceHandler {
         final AtomicReference<SendFileResult> sendFileStepResult = new AtomicReference<>();
         final AtomicLong prepareEngineTimeMillisRef = new AtomicLong();
 
-        if (isSequenceNumberBasedRecovery) {
+        if (isSequenceNumberBasedRecovery) { // 增量恢复分支，跳过phase1直接进入下一个流程
             logger.trace("performing sequence numbers based recovery. starting at [{}]", request.startingSeqNo());
             startingSeqNo = request.startingSeqNo();
-            if (retentionLease == null) {
+            if (retentionLease == null) { // 只需要确保retention lease存在
                 createRetentionLease(startingSeqNo, sendFileStep.map(ignored -> SendFileResult.EMPTY));
             } else {
                 sendFileStep.onResponse(SendFileResult.EMPTY);
             }
-        } else {
+        } else {  // 全量恢复分支
             final Engine.IndexCommitRef safeCommitRef;
             try {
-                safeCommitRef = acquireSafeCommit(shard);
+                safeCommitRef = acquireSafeCommit(shard); // 获取主分片的safe commit，最新已经持久化的Lucene commit点
                 resources.add(safeCommitRef);
             } catch (final Exception e) {
                 throw new RecoveryEngineException(shard.shardId(), 1, "snapshot failed", e);
@@ -264,6 +283,7 @@ public class RecoverySourceHandler {
             // advances and not when creating a new safe commit. In any case this is a best-effort thing since future recoveries can
             // always fall back to file-based ones, and only really presents a problem if this primary fails before things have settled
             // down.
+            // 从 safe commit 的 userData 中读出 local checkpoint，+1 作为后续 phase2 传操作的起点。意思是"文件传的是 commit 点之前的数据，操作传的是 commit 点之后的"
             startingSeqNo = Long.parseLong(safeCommitRef.getIndexCommit().getUserData().get(SequenceNumbers.LOCAL_CHECKPOINT_KEY)) + 1L;
             logger.trace("performing file-based recovery followed by history replay starting at [{}]", startingSeqNo);
 
@@ -282,7 +302,7 @@ public class RecoverySourceHandler {
                 // If the target previously had a copy of this shard then a file-based recovery might move its global checkpoint
                 // backwards. We must therefore remove any existing retention lease so that we can create a new one later on in the
                 // recovery.
-                deleteRetentionLease(ActionListener.wrap(ignored -> {
+                deleteRetentionLease(ActionListener.wrap(ignored -> { // 全量恢复会改变副本的 global checkpoint，旧 lease 无效了
                     assert Transports.assertNotTransportThread(RecoverySourceHandler.this + "[phase1]");
                     phase1(safeCommitRef.getIndexCommit(), startingSeqNo, () -> estimateNumOps, sendFileStep);
                 }, onFailure));
@@ -293,7 +313,7 @@ public class RecoverySourceHandler {
         }
         assert startingSeqNo >= 0 : "startingSeqNo must be non negative. got: " + startingSeqNo;
 
-        sendFileStep.addListener(ActionListener.wrap(r -> {
+        sendFileStep.addListener(ActionListener.wrap(r -> { // 通知副本打开 Engine，准备好接收 translog 操作
             assert Transports.assertNotTransportThread(RecoverySourceHandler.this + "[prepareTargetForTranslog]");
             sendFileStepResult.set(r);
             // For a sequence based recovery, the target can keep its local translog
@@ -310,7 +330,7 @@ public class RecoverySourceHandler {
              * all documents up to maxSeqNo in phase2.
              */
             runUnderPrimaryPermit(
-                () -> shard.initiateTracking(request.targetAllocationId()),
+                () -> shard.initiateTracking(request.targetAllocationId()), // 主分片把副本加入 replication group
                 shard,
                 cancellableThreads,
                 ActionListener.wrap(ignored -> {
@@ -326,7 +346,7 @@ public class RecoverySourceHandler {
                         false,
                         true,
                         chunkSizeInBytes
-                    );
+                    ); // 从 Lucene 中获取 startingSeqNo 到最新的所有变
                     resources.add(phase2Snapshot);
                     retentionLock.close();
 
@@ -336,7 +356,7 @@ public class RecoverySourceHandler {
                     final long maxSeqNoOfUpdatesOrDeletes = shard.getMaxSeqNoOfUpdatesOrDeletes();
                     final RetentionLeases retentionLeases = shard.getRetentionLeases();
                     final long mappingVersionOnPrimary = shard.indexSettings().getIndexMetadata().getMappingVersion();
-                    phase2(
+                    phase2( // phase2——把变更操作逐批发送给副本。
                         startingSeqNo,
                         endingSeqNo,
                         phase2Snapshot,
@@ -517,12 +537,14 @@ public class RecoverySourceHandler {
             final Store.MetadataSnapshot recoverySourceMetadata;
             final String shardStateIdentifier;
             try {
+                // 从主分片的 safe commit 中读取所有 segment 文件的元数据（文件名、大小、checksum）
                 recoverySourceMetadata = store.getMetadata(snapshot);
                 shardStateIdentifier = SnapshotShardsService.getShardStateId(shard, snapshot);
             } catch (CorruptIndexException | IndexFormatTooOldException | IndexFormatTooNewException ex) {
                 shard.failShard("recovery", ex);
                 throw ex;
             }
+            // 校验：commit 中引用的文件必须都在元数据快照中存在，否则说明索引损坏。
             for (String name : snapshot.getFileNames()) {
                 final StoreFileMetadata md = recoverySourceMetadata.get(name);
                 if (md == null) {
@@ -545,8 +567,8 @@ public class RecoverySourceHandler {
                     l -> recoveryPlannerService.computeRecoveryPlan(
                         shard.shardId(),
                         shardStateIdentifier,
-                        recoverySourceMetadata,
-                        request.metadataSnapshot(),
+                        recoverySourceMetadata,     // 主分片有哪些文件
+                        request.metadataSnapshot(), // 副本有哪些文件（副本之前发过来的）,
                         startingSeqNo,
                         translogOps.getAsInt(),
                         getRequest().targetNode().getMaxIndexVersion(),
@@ -637,7 +659,7 @@ public class RecoverySourceHandler {
                 ByteSizeValue.ofBytes(existingTotalSize)
             );
         }
-
+        // 核心流程在这里
         new FileBasedRecoveryContext(store, stopWatch, shardRecoveryPlan).run(listener);
     }
 
@@ -675,9 +697,10 @@ public class RecoverySourceHandler {
 
             SubscribableListener
                 // send the original plan
-                .newForked(this::sendShardRecoveryPlanFileInfo)
+                .newForked(this::sendShardRecoveryPlanFileInfo) // 发送文件清单，"我要给你发这些文件，你已有的这些文件可以保留"。
                 // instruct the target to recover files from snapshot, possibly updating the plan on failure
                 .<List<StoreFileMetadata>>andThen(
+                        // 如果配置了快照仓库，优先让副本自己从快照仓库下载文件（不经过主分片网络传输，减轻主分片压力）
                     l -> recoverSnapshotFiles(shardRecoveryPlan, l.delegateResponse((recoverSnapshotFilesListener, e) -> {
                         if (shardRecoveryPlan.canRecoverSnapshotFilesFromSourceNode() == false
                             && e instanceof CancellableThreads.ExecutionCancelledException == false) {
@@ -689,6 +712,7 @@ public class RecoverySourceHandler {
                     }))
                 )
                 // send local files which either aren't in the snapshot, or which failed to be recovered from the snapshot for some reason
+                // 从主分片直接传文件
                 .<Void>andThen((sendFilesListener, filesFailedToRecoverFromSnapshot) -> {
                     final List<StoreFileMetadata> filesToRecoverFromSource;
                     if (filesFailedToRecoverFromSnapshot.isEmpty()) {
@@ -700,7 +724,7 @@ public class RecoverySourceHandler {
                         );
                     }
 
-                    sendFiles(
+                    sendFiles( // 真正的文件传输方法
                         store,
                         filesToRecoverFromSource.toArray(new StoreFileMetadata[0]),
                         shardRecoveryPlan::getTranslogOps,
@@ -712,6 +736,12 @@ public class RecoverySourceHandler {
                     createRetentionLeaseListener -> createRetentionLease(shardRecoveryPlan.getStartingSeqNo(), createRetentionLeaseListener)
                 )
                 // run cleanFiles, renaming temp files, removing surplus ones, creating an empty translog and so on
+                /** 通知副本执行收尾工作：
+                 *  1. 把临时文件重命名为正式文件名
+                 *  2. 删除副本上不属于这次恢复的多余文件
+                 *  3. 创建一个新的空 translog
+                 *  4. 校验文件 checksum
+                 */
                 .<Void>andThen((finalRecoveryPlanListener, retentionLease) -> {
                     final Store.MetadataSnapshot recoverySourceMetadata = shardRecoveryPlan.getSourceMetadataSnapshot();
                     final long lastKnownGlobalCheckpoint = shard.getLastKnownGlobalCheckpoint();
@@ -1286,8 +1316,9 @@ public class RecoverySourceHandler {
         }
     }
 
+    // 不是调用 Lucene 的高层接口，是直接读磁盘上的物理文件字节流，分块通过网络传输。
     void sendFiles(Store store, StoreFileMetadata[] files, IntSupplier translogOps, ActionListener<Void> listener) {
-        ArrayUtil.timSort(files, Comparator.comparingLong(StoreFileMetadata::length)); // send smallest first
+        ArrayUtil.timSort(files, Comparator.comparingLong(StoreFileMetadata::length)); // 小文件优先
         // use a smaller buffer than the configured chunk size if we only have files smaller than the chunk size
         final int bufferSize = files.length == 0 ? 0 : (int) Math.min(chunkSizeInBytes, files[files.length - 1].length());
         Releasable temporaryStoreRef = acquireStore(store);
@@ -1314,6 +1345,10 @@ public class RecoverySourceHandler {
                         // we already have the file contents on heap no need to open the file again
                         currentInput = null;
                     } else {
+                        // 通过 Lucene 的 Directory.openInput 打开文件。
+                        // 注意这不是"调用 Lucene 的索引接口"
+                        // Directory.openInput 本质就是打开一个文件的读取流，和 new FileInputStream(file) 没有本质区别
+                        // 只是 Lucene 对文件系统的抽象。
                         currentInput = store.directory().openInput(md.name(), IOContext.DEFAULT);
                     }
                 }
@@ -1329,6 +1364,7 @@ public class RecoverySourceHandler {
                     }
                     final byte[] buffer = Objects.requireNonNullElseGet(buffers.pollFirst(), () -> new byte[bufferSize]);
                     assert liveBufferCount.incrementAndGet() > 0;
+                    // 分块读取。每次读一个 chunkSize 大小的块（默认 960KB）
                     final int toRead = Math.toIntExact(Math.min(md.length() - offset, buffer.length));
                     currentInput.readBytes(buffer, 0, toRead, false);
                     final boolean lastChunk = offset + toRead == md.length();

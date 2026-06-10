@@ -68,6 +68,7 @@ public class UpdateHelper {
      * Prepares an update request by converting it into an index or delete request or an update response (no action).
      */
     public Result prepare(UpdateRequest request, IndexShard indexShard, LongSupplier nowInMillis, String[] gFields) throws IOException {
+        // 先读取旧的文档
         final GetResult getResult = indexShard.getService().getForUpdate(request.id(), request.ifSeqNo(), request.ifPrimaryTerm(), gFields);
         return prepare(indexShard, request, getResult, nowInMillis);
     }
@@ -78,16 +79,16 @@ public class UpdateHelper {
      */
     protected Result prepare(IndexShard indexShard, UpdateRequest request, final GetResult getResult, LongSupplier nowInMillis) {
         if (getResult.isExists() == false) {
-            // If the document didn't exist, execute the update request as an upsert
+            // 文档不存在，走upsert
             return prepareUpsert(indexShard.shardId(), request, getResult, nowInMillis);
         } else if (getResult.internalSourceRef() == null) {
             // no source, we can't do anything, throw a failure...
             throw new DocumentSourceMissingException(indexShard.shardId(), request.id());
         } else if (request.script() == null && request.doc() != null) {
-            // The request has no script, it is a new doc that should be merged with the old document
+            // 请求没有脚本，只有doc，合并新旧文档
             return prepareUpdateIndexRequest(indexShard, request, getResult, request.detectNoop());
         } else {
-            // The request has a script (or empty script), execute the script and prepare a new index request
+            // 有脚本，执行脚本，看脚本把 ctx.op 设成什么
             return prepareUpdateScriptRequest(indexShard, request, getResult, nowInMillis);
         }
     }
@@ -197,7 +198,7 @@ public class UpdateHelper {
             updatedSourceAsMap,
             currentRequest.sourceAsMap(XContentParserDecorator.NOOP),
             detectNoop
-        ) == false;
+        ) == false; // 看看merge后是否有变化，没有变化就直接返回noop响应，不生成底层写请求
 
         // We can only actually turn the update into a noop if detectNoop is true to preserve backwards compatibility and to handle cases
         // where users repopulating multi-fields or adding synonyms, etc.
@@ -224,7 +225,7 @@ public class UpdateHelper {
                 )
             );
             return new Result(update, DocWriteResponse.Result.NOOP, updatedSourceAsMap, updateSourceContentType);
-        } else {
+        } else { // 有变化，生成一个新的IndexRequest
             String index = request.index();
             IndexRequest finalIndexRequest = new IndexRequest(index).id(request.id())
                 .routing(routing)

@@ -120,6 +120,27 @@ import static org.elasticsearch.index.engine.Engine.ES_VERSION;
  *          store.decRef();
  *      }
  * </pre>
+ * Store 是属于一个分片（IndexShard）的、对 Lucene Directory 的封装和管理层
+ * Store 不直接存储数据，它是对 Lucene Directory 的一层封装。Lucene 的 Directory 负责最底层的文件读写（如 _0.cfs、segments_1 这些文件），Store 在上面加了：
+ *   - 文件删除日志
+ *   - checksum 校验
+ *   - 损坏标记
+ *
+ *   IndexShard、Engine、Recovery 流程都通过 Store 访问磁盘文件
+ *
+ *   Store vs 其他组件的关系图
+ *
+ *                           IndexShard（分片）
+ *                          /        |         \
+ *                        Store    Engine    Translog
+ *                         |         |          |
+ *                    StoreDirectory  |     translog 文件
+ *                         |         |
+ *                     Lucene Directory ← IndexWriter 读写 segment 文件
+ *                         |
+ *                 磁盘文件系统
+ *        /data/nodes/0/indices/{index_uuid}/{shard_id}/index/
+ *            _0.cfs, _0.cfe, _0.si, segments_1, ...
  */
 public class Store extends AbstractIndexShardComponent implements Closeable, RefCounted {
 
@@ -160,12 +181,16 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
     }
 
     private final AtomicBoolean isClosed = new AtomicBoolean(false);
-    private final StoreDirectory directory;
-    private final ReentrantReadWriteLock metadataLock = new ReentrantReadWriteLock();
-    private final ShardLock shardLock;
+    // 对 Lucene Directory 的包装
+    private final StoreDirectory directory
+    // 保护元数据读写并发
+    private final ReentrantReadWriteLock metadataLock = new ReentrantReadWriteLock()
+    // 文件系统锁，防止同一个分片被多个进程打开
+    private final ShardLock shardLock
     private final OnClose onClose;
 
-    private final AbstractRefCounted refCounter = AbstractRefCounted.of(this::closeInternal); // close us once we are done
+    // 引用计数，多个组件可能同时持有当前Store的引用
+    private final AbstractRefCounted refCounter = AbstractRefCounted.of(this::closeInternal) // close us once we are done
     private boolean hasIndexSort;
 
     public Store(ShardId shardId, IndexSettings indexSettings, Directory directory, ShardLock shardLock) {
@@ -243,6 +268,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
     /**
      * Returns a new MetadataSnapshot for the given commit. If the given commit is <code>null</code>
      * the latest commit point is used.
+     * 提供文件元数据快照（MetadataSnapshot）
      *
      * Note that this method requires the caller verify it has the right to access the store and
      * no concurrent file changes are happening. If in doubt, you probably want to use one of the following:
@@ -632,6 +658,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         }
     }
 
+    // 检查 store 是否损坏
     public void failIfCorrupted() throws IOException {
         ensureOpen();
         failIfCorrupted(directory);
@@ -1174,6 +1201,11 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         public final List<StoreFileMetadata> different;
         /**
          * Files that exist in the source but not in the target
+         * | 分类      | 含义                       | 处理方式           |
+         * |-----------|--------------------------|-------------------|
+         * | identical | 两边都有，且 checksum 相同 | 不传，副本直接复用   |
+         * | different | 两边都有，但 checksum 不同 | 需要传             |
+         * | missing   | 主分片有，副本没有         | 需要传             |
          */
         public final List<StoreFileMetadata> missing;
 
@@ -1429,6 +1461,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
     /**
      * Marks an existing lucene index with a new history uuid.
      * This is used to make sure no existing shard will recovery from this index using ops based recovery.
+     * 打开一个临时的 IndexWriter，修改 Lucene commit 中的 userData（元数据），写入一个全新的 history_uuid，然后 commit
      */
     public void bootstrapNewHistory() throws IOException {
         metadataLock.writeLock().lock();
@@ -1547,6 +1580,20 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         }
     }
 
+    /**
+     * segments_1 文件内容（逻辑表示）：
+     *   {
+     *     segments: [_0.cfs, _1.cfs, ...],
+     *     userData: {
+     *       "history_uuid": "abc123...",          ← bootstrapNewHistory 改的就是这个
+     *       "local_checkpoint": "10000",
+     *       "max_seq_no": "10000",
+     *       "translog_uuid": "xyz789...",          ← associateIndexWithNewTranslog 改的是这个
+     *       "min_retained_seq_no": "5000",
+     *       ...
+     *     }
+     *   }
+     */
     private static void updateCommitData(IndexWriter writer, Map<String, String> keysToUpdate) throws IOException {
         final Map<String, String> userData = getUserData(writer);
         userData.put(Engine.ES_VERSION, IndexVersion.current().toString());

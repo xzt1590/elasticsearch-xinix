@@ -87,7 +87,7 @@ public final class StoreRecovery {
      * @see Store
      */
     void recoverFromStore(final IndexShard indexShard, ActionListener<Boolean> listener) {
-        if (canRecover(indexShard)) {
+        if (canRecover(indexShard)) { // 判断分片状态，必须是主分片才可以执行
             RecoverySource.Type recoveryType = indexShard.recoveryState().getRecoverySource().getType();
             assert recoveryType == RecoverySource.Type.EMPTY_STORE || recoveryType == RecoverySource.Type.EXISTING_STORE
                 : "expected store recovery type but was: " + recoveryType;
@@ -417,12 +417,13 @@ public final class StoreRecovery {
      */
     private void internalRecoverFromStore(IndexShard indexShard, ActionListener<Void> outerListener) {
         final List<Releasable> releasables = new ArrayList<>(1);
-        SubscribableListener
+        SubscribableListener // 4个大的lambda表达式，代表调用链的顺序，一个成功了才执行下一个
 
             .newForked(indexShard::preRecovery)
 
             .<Void>andThen(l -> {
-                final RecoveryState recoveryState = indexShard.recoveryState();
+                final RecoveryState recoveryState = indexShard.recoveryState(); // 恢复流程的上下文都存在这
+                // 只要不是初始化分片，index都应该存在，这里就是true
                 final boolean indexShouldExists = recoveryState.getRecoverySource().getType() != RecoverySource.Type.EMPTY_STORE;
                 indexShard.prepareForIndexRecovery();
                 SegmentInfos si = null;
@@ -440,7 +441,7 @@ public final class StoreRecovery {
                         } catch (Exception inner) {
                             files += " (failure=" + ExceptionsHelper.stackTrace(inner) + ")";
                         }
-                        if (indexShouldExists) {
+                        if (indexShouldExists) { // 没有文件但是理论上应该存在索引，抛异常
                             throw new IndexShardRecoveryException(
                                 shardId,
                                 "shard allocated for local recovery (post api), should exist, but doesn't, current files: " + files,
@@ -448,7 +449,7 @@ public final class StoreRecovery {
                             );
                         }
                     }
-                    if (si != null && indexShouldExists == false) {
+                    if (si != null && indexShouldExists == false) { // 新建索引的类型
                         // it exists on the directory, but shouldn't exist on the FS, its a leftover (possibly dangling)
                         // its a "new index create" API, we have to do something, so better to clean it than use same data
                         logger.trace("cleaning existing shard, shouldn't exists");
@@ -476,6 +477,7 @@ public final class StoreRecovery {
                     } catch (IOException e) {
                         logger.debug("failed to list file details", e);
                     }
+                    // 这里的意思是本地的文件已经登记好了，本地只需要登记不需要回放
                     index.setFileDetailsComplete();
                 } else {
                     store.createEmpty();

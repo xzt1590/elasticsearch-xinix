@@ -1142,6 +1142,7 @@ public class InternalEngine extends Engine {
         return localCheckpointTracker.generateSeqNo();
     }
 
+    // 真正的本地写引擎入口，先决定这次 index 应该怎么写，再分配 seqNo，再写 Lucene，再记 translog，最后更新内存状态并返回 IndexResult
     @Override
     public IndexResult index(Index index) throws IOException {
         final boolean doThrottle = index.origin().isRecovery() == false;
@@ -1149,7 +1150,7 @@ public class InternalEngine extends Engine {
             assert assertIncomingSequenceNumber(index.origin(), index.seqNo());
             int reservedDocs = 0;
             try (
-                Releasable ignored = versionMap.acquireLock(index.uid());
+                Releasable ignored = versionMap.acquireLock(index.uid()); // 同一个文档 id（更准确说 same UID）在 engine 里串行处理
                 Releasable indexThrottle = doThrottle ? throttle.acquireThrottle() : () -> {}
             ) {
                 lastWriteNanos = index.startTime();
@@ -1179,6 +1180,7 @@ public class InternalEngine extends Engine {
                  *  if A arrives on the shard first we use addDocument since maxUnsafeAutoIdTimestamp is < 10. A` will then just be skipped
                  *  or calls updateDocument.
                  */
+                // 第一步：真正主链路的第一步：先做一个“写入计划” plan
                 final IndexingStrategy plan = indexingStrategyForOperation(index);
                 reservedDocs = plan.reservedDocs;
 
@@ -1193,7 +1195,7 @@ public class InternalEngine extends Engine {
                         index = new Index(
                             index.uid(),
                             index.parsedDoc(),
-                            generateSeqNoForOperationOnPrimary(index),
+                            generateSeqNoForOperationOnPrimary(index), // 这里真正分配seqNo
                             index.primaryTerm(),
                             index.version(),
                             index.versionType(),
@@ -1207,7 +1209,7 @@ public class InternalEngine extends Engine {
 
                         final boolean toAppend = plan.indexIntoLucene && plan.useLuceneUpdateDocument == false;
                         if (toAppend == false) {
-                            advanceMaxSeqNoOfUpdatesOnPrimary(index.seqNo());
+                            advanceMaxSeqNoOfUpdatesOnPrimary(index.seqNo()); // 如果不是append类型，要维护“更新类操作的最大 seqNo”这类顺序信息
                         }
                     } else {
                         markSeqNoAsSeen(index.seqNo());
@@ -1216,7 +1218,7 @@ public class InternalEngine extends Engine {
                     assert index.seqNo() >= 0 : "ops should have an assigned seq no.; origin: " + index.origin();
 
                     if (plan.indexIntoLucene || plan.addStaleOpToLucene) {
-                        indexResult = indexIntoLucene(index, plan);
+                        indexResult = indexIntoLucene(index, plan); // 真正写进lucene的地方
                     } else {
                         indexResult = new IndexResult(
                             plan.versionForIndexing,
@@ -1227,10 +1229,10 @@ public class InternalEngine extends Engine {
                         );
                     }
                 }
-                if (index.origin().isFromTranslog() == false) {
+                if (index.origin().isFromTranslog() == false) { // 如果这次操作不是“从 translog 重放来的”
                     final Translog.Location location;
                     if (indexResult.getResultType() == Result.Type.SUCCESS) {
-                        location = translog.add(new Translog.Index(index, indexResult));
+                        location = translog.add(new Translog.Index(index, indexResult)); // 写入translog
                     } else if (indexResult.getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO) {
                         // if we have document failure, record it as a no-op in the translog and Lucene with the generated seq_no
                         final NoOp noOp = new NoOp(
@@ -1248,13 +1250,13 @@ public class InternalEngine extends Engine {
                 }
                 if (plan.indexIntoLucene && indexResult.getResultType() == Result.Type.SUCCESS) {
                     final Translog.Location translogLocation = trackTranslogLocation.get() ? indexResult.getTranslogLocation() : null;
-                    versionMap.maybePutIndexUnderLock(
+                    versionMap.maybePutIndexUnderLock( // 把这次文档最新版本、seqNo、term、translog location 更新到内存版图里
                         index.uid(),
                         new IndexVersionValue(translogLocation, plan.versionForIndexing, index.seqNo(), index.primaryTerm())
                     );
                 }
-                localCheckpointTracker.markSeqNoAsProcessed(indexResult.getSeqNo());
-                if (indexResult.getTranslogLocation() == null) {
+                localCheckpointTracker.markSeqNoAsProcessed(indexResult.getSeqNo());// 标记 seqNo 已 processed
+                if (indexResult.getTranslogLocation() == null) { // 如果这次没有 translog location，则可直接标记 persisted
                     // the op is coming from the translog (and is hence persisted already) or it does not have a sequence number
                     assert index.origin().isFromTranslog() || indexResult.getSeqNo() == SequenceNumbers.UNASSIGNED_SEQ_NO;
                     localCheckpointTracker.markSeqNoAsPersisted(indexResult.getSeqNo());
@@ -1326,18 +1328,19 @@ public class InternalEngine extends Engine {
 
     private IndexingStrategy planIndexingAsPrimary(Index index) throws IOException {
         assert index.origin() == Operation.Origin.PRIMARY : "planing as primary but origin isn't. got " + index.origin();
-        final int reservingDocs = index.parsedDoc().docs().size();
+        final int reservingDocs = index.parsedDoc().docs().size(); // 先看这次文档会占多少 Lucene docs
         final IndexingStrategy plan;
         // resolve an external operation into an internal one which is safe to replay
-        final boolean canOptimizeAddDocument = canOptimizeAddDocument(index);
+        final boolean canOptimizeAddDocument = canOptimizeAddDocument(index); // 先判断能不能走 append-only 优化
         if (canOptimizeAddDocument && mayHaveBeenIndexedBefore(index) == false) {
+            // 如果这是典型的自动生成 id、新文档追加场景，就尽量走 append 路线，不做昂贵的现有文档查找和 update 路线
             final Exception reserveError = tryAcquireInFlightDocs(index, reservingDocs);
             if (reserveError != null) {
                 plan = IndexingStrategy.failAsTooManyDocs(reserveError, index.id());
             } else {
                 plan = IndexingStrategy.optimizedAppendOnly(1L, reservingDocs);
             }
-        } else {
+        } else { // 正常写计划，先把“冲突判断、版本决定、写入策略、资源预留”全部决定好
             versionMap.enforceSafeAccess();
             // resolves incoming version
             final VersionValue versionValue = resolveDocVersion(index, index.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO);
@@ -1402,15 +1405,17 @@ public class InternalEngine extends Engine {
          * number service if this is on the primary, or the existing document's sequence number if this is on the replica. The
          * primary term here has already been set, see IndexShard#prepareIndex where the Engine$Index operation is created.
          */
+        // 先把 seqNo / term / version 写回文档对象
+        // 这说明：真正写 Lucene 前，文档本身要先带上这次操作确定下来的 seqNo、primary term、version
         index.parsedDoc().updateSeqID(index.seqNo(), index.primaryTerm());
         index.parsedDoc().version().setLongValue(plan.versionForIndexing);
         try {
-            if (plan.addStaleOpToLucene) {
+            if (plan.addStaleOpToLucene) { // stale op
                 addStaleDocs(index.docs(), indexWriter);
-            } else if (plan.useLuceneUpdateDocument) {
+            } else if (plan.useLuceneUpdateDocument) { // update 路线
                 assert assertMaxSeqNoOfUpdatesIsAdvanced(index.uid(), index.seqNo(), true, true);
                 updateDocs(index.uid(), index.docs(), indexWriter);
-            } else {
+            } else { // append/create 路线
                 // document does not exists, we can optimize for create, but double check if assertions are running
                 assert assertDocDoesNotExist(index, canOptimizeAddDocument(index) == false);
                 addDocs(index.docs(), indexWriter);

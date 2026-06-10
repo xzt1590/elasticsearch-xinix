@@ -746,6 +746,7 @@ public class TransportService extends AbstractLifecycleComponent
         connectionManager.removeListener(listener);
     }
 
+    // 一个通用的节点间互相交互的方法
     public <T extends TransportResponse> void sendRequest(
         final DiscoveryNode node,
         final String action,

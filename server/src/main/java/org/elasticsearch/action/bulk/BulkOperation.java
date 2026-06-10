@@ -128,7 +128,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             relativeTimeProvider,
             startTimeNanos,
             listener,
-            new ClusterStateObserver(clusterService, bulkRequest.timeout(), logger, threadPool.getThreadContext()),
+            new ClusterStateObserver(clusterService, bulkRequest.timeout(), logger, threadPool.getThreadContext()),// 是一个包装好的记录当前version的类
             new FailureStoreDocumentConverter(),
             failureStoreMetrics,
             dataStreamFailureStoreSettings
@@ -175,10 +175,11 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
     @Override
     protected void doRun() {
         assert bulkRequest != null;
-        final ClusterState clusterState = observer.setAndGetObservedState();
+        final ClusterState clusterState = observer.setAndGetObservedState(); // observer可以看成一个视图
         if (handleBlockExceptions(clusterState, BulkOperation.this, this::onFailure)) {
             return;
         }
+        // 按照shard进行分组，核心逻辑
         Map<ShardId, List<BulkItemRequest>> requestsByShard = groupBulkRequestsByShards(clusterState);
         executeBulkRequestsByShard(requestsByShard, clusterState, this::redirectFailuresOrCompleteBulkOperation);
     }
@@ -282,9 +283,11 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         Iterator<BulkItemRequest> it,
         BiConsumer<IndexAbstraction, DocWriteRequest<?>> indexOperationValidator
     ) {
+        // 缓存解析结果和routing规则
         final ConcreteIndices concreteIndices = new ConcreteIndices(clusterState, indexNameExpressionResolver);
         Metadata metadata = clusterState.metadata();
         // Group the requests by ShardId -> Operations mapping
+        // Bulk中的文档按照分片id分类
         Map<ShardId, List<BulkItemRequest>> requestsByShard = new HashMap<>();
 
         while (it.hasNext()) {
@@ -672,6 +675,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
      *                         waiting for a block to clear.
      * @return {@code true} if the cluster is currently blocked at all, {@code false} if the cluster has no blocks.
      */
+    // 判断当前集群是否有全局 WRITE block，可重试就等待下一版cluster state，不可重试就直接返回失败
     private boolean handleBlockExceptions(ClusterState state, Runnable retryOperation, Consumer<Exception> onClusterBlocked) {
         ClusterBlockException blockException = state.blocks().globalBlockedException(ClusterBlockLevel.WRITE);
         if (blockException != null) {

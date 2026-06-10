@@ -80,8 +80,10 @@ public class NodeClient extends AbstractClient {
         ActionListener<Response> listener
     ) {
         // Discard the task because the Client interface doesn't use it.
+        // 丢弃返回值
         try {
             executeLocally(action, request, listener);
+            // 三类异常，父任务被取消，action未初始化，http header校验失败
         } catch (TaskCancelledException | IllegalArgumentException | IllegalStateException e) {
             // #executeLocally returns the task and throws TaskCancelledException if it fails to register the task because the parent
             // task has been cancelled, IllegalStateException if the client was not in a state to execute the request because it was not
@@ -103,6 +105,7 @@ public class NodeClient extends AbstractClient {
         Request request,
         ActionListener<Response> listener
     ) {
+        // 统一的执行入口，目前读写都会走到这，action的值决定具体使用哪个transportAction
         return taskManager.registerAndExecute(
             "transport",
             transportAction(action),

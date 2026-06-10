@@ -135,7 +135,7 @@ public class PeerRecoverySourceService extends AbstractLifecycleComponent implem
     }
 
     private void recover(StartRecoveryRequest request, Task task, ActionListener<RecoveryResponse> listener) {
-        PeerRecoverySourceClusterStateDelay.ensureClusterStateVersion(
+        PeerRecoverySourceClusterStateDelay.ensureClusterStateVersion( // 等待本节点的集群状态版本 >= 请求中携带的版本号
             request.clusterStateVersion(),
             clusterService,
             transportService.getThreadPool().generic(),
@@ -159,9 +159,9 @@ public class PeerRecoverySourceService extends AbstractLifecycleComponent implem
         final IndexService indexService = indicesService.indexServiceSafe(request.shardId().getIndex());
         final IndexShard shard = indexService.getShard(request.shardId().id());
 
-        final ShardRouting routingEntry = shard.routingEntry();
+        final ShardRouting routingEntry = shard.routingEntry(); // 找到主分片
 
-        if (routingEntry.primary() == false || routingEntry.active() == false) {
+        if (routingEntry.primary() == false || routingEntry.active() == false) { // 必须是活跃的主分片
             throw new DelayRecoveryException("source shard [" + routingEntry + "] is not an active primary");
         }
 

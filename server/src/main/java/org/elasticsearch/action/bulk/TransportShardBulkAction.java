@@ -170,6 +170,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         performOnPrimary(request, primary, updateHelper, threadPool::absoluteTimeInMillis, (update, shardId, mappingListener) -> {
             assert update != null;
             assert shardId != null;
+            // 这里的作用是假如这次请求中携带了新的字段，需要向master节点发送请求更新mapping，然后本地拿到后再继续写入
             mappingUpdatedAction.updateMappingOnMaster(shardId.getIndex(), update, mappingListener);
         }, (mappingUpdateListener, initialMappingVersion) -> observer.waitForNextChange(new ClusterStateObserver.Listener() {
             @Override
@@ -227,6 +228,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         );
     }
 
+    // bulk shard 在 primary 上真正开始处理请求的主函数。
     public static void performOnPrimary(
         BulkShardRequest request,
         IndexShard primary,
@@ -241,7 +243,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         DocumentParsingProvider documentParsingProvider
     ) {
         new ActionRunnable<>(listener) {
-
+            // bulk shard 并不是“递归地随手处理”，而是靠这个 context 串着整个批次往前推进。
             private final BulkPrimaryExecutionContext context = new BulkPrimaryExecutionContext(request, primary);
 
             final long startBulkTime = System.nanoTime();
@@ -249,7 +251,8 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             private final ActionListener<Void> onMappingUpdateDone = ActionListener.wrap(v -> executor.execute(this), this::onRejection);
 
             @Override
-            protected void doRun() throws Exception {
+            protected void doRun() throws Exception { // 单个 bulk item 的真正执行入口
+                // 循环目的是“驱动 context 状态前进”，这里是一个状态机的流转，直到变成COMPLETED才算完成
                 while (context.hasMoreOperationsToExecute()) {
                     if (executeBulkItemRequest(
                         context,
@@ -340,10 +343,12 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
 
         // Translate update requests into index or delete requests which can be executed directly
         final UpdateHelper.Result updateResult;
+        // UPDATE 不是引擎直接执行的底层原语，要翻译成IndexRequest或者DeleteRequest或者NOOP
         if (opType == DocWriteRequest.OpType.UPDATE) {
             final UpdateRequest updateRequest = (UpdateRequest) context.getCurrent();
             try {
                 var gFields = getStoredFieldsSpec(context.getPrimary());
+                // 把 update 转换成 index request、delete request
                 updateResult = updateHelper.prepare(updateRequest, context.getPrimary(), nowInMillisSupplier, gFields);
             } catch (Exception failure) {
                 // we may fail translating a update to index or delete operation
@@ -361,18 +366,18 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                 return true;
             }
             context.setRequestToExecute(updateResult.action());
-        } else {
+        } else { // index（只有删除和index这两种）
             context.setRequestToExecute(context.getCurrent());
             updateResult = null;
         }
 
         assert context.getRequestToExecute() != null; // also checks that we're in TRANSLATED state
-
+        //真正的写引擎
         final IndexShard primary = context.getPrimary();
         final long version = context.getRequestToExecute().version();
         final boolean isDelete = context.getRequestToExecute().opType() == DocWriteRequest.OpType.DELETE;
         final Engine.Result result;
-        if (isDelete) {
+        if (isDelete) { // 删除
             final DeleteRequest request = context.getRequestToExecute();
             result = primary.applyDeleteOperationOnPrimary(
                 version,
@@ -494,6 +499,11 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         return isDelete ? primary.getFailedDeleteResult(e, version, id) : primary.getFailedIndexResult(e, version, id);
     }
 
+    /*
+     *把刚才 InternalEngine 返回的 Engine.Result
+     *变成当前 bulk item 的执行结果
+     *存进 BulkPrimaryExecutionContext
+     */
     private static void onComplete(Engine.Result r, BulkPrimaryExecutionContext context, UpdateHelper.Result updateResult) {
         context.markOperationAsExecuted(r);
         final DocWriteRequest<?> docWriteRequest = context.getCurrent();

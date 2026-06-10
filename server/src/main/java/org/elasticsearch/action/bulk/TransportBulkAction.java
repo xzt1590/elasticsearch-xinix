@@ -204,7 +204,7 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
     }
 
     @Override
-    protected void doInternalExecute(
+    protected void doInternalExecute( // 主要是检查资源是否准备好
         Task task,
         BulkRequest bulkRequest,
         Executor executor,
@@ -271,6 +271,7 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
         Set<String> dataStreamsToBeRolledOver,
         Set<String> failureStoresToBeRolledOver
     ) {
+        // 先扫描一遍 bulk 里的请求，看看正式写入前要不要先做“前置动作”
         ClusterState state = clusterService.state();
         // A map for memorizing which indices exist.
         Map<String, Boolean> indexExistence = new HashMap<>();
@@ -451,7 +452,7 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
         Map<String, Exception> failureStoreExceptions,
         BulkRequest bulkRequest,
         AtomicArray<BulkItemResponse> responses
-    ) {
+    ) { // 真正执行bulk写入的地方
         if (indicesExceptions.isEmpty() && dataStreamExceptions.isEmpty() && failureStoreExceptions.isEmpty()) {
             return;
         }

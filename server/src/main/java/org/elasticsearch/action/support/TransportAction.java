@@ -64,6 +64,7 @@ public abstract class TransportAction<Request extends ActionRequest, Response ex
         );
     }
 
+    // 公共逻辑
     private void handleExecution(
         Task task,
         Request request,
@@ -71,7 +72,7 @@ public abstract class TransportAction<Request extends ActionRequest, Response ex
         TransportActionHandler<Request, Response> handler
     ) {
         final ActionRequestValidationException validationException;
-        try {
+        try { // 校验请求
             validationException = request.validate();
         } catch (Exception e) {
             assert false : new AssertionError("validating of request [" + request + "] threw exception", e);
@@ -83,6 +84,7 @@ public abstract class TransportAction<Request extends ActionRequest, Response ex
             listener.onFailure(validationException);
             return;
         }
+        // 如果需要，包装成结果可存储的listener
         if (task != null && request.getShouldStoreResult()) {
             listener = new TaskResultStoringActionListener<>(taskManager, task, listener);
         }
@@ -90,8 +92,9 @@ public abstract class TransportAction<Request extends ActionRequest, Response ex
         // Note on request refcounting: we can be sure that either we get to the end of the chain (and execute the actual action) or
         // we complete the response listener and short-circuit the outer chain, so we release our request ref on both paths, using
         // Releasables#releaseOnce to avoid a double-release.
-        request.mustIncRef();
+        request.mustIncRef(); // 也是引用计数
         final var releaseRef = Releasables.releaseOnce(request::decRef);
+        // 构造过滤器链 RequestFilterChain
         RequestFilterChain<Request, Response> requestFilterChain = new RequestFilterChain<>(this, logger, handler, releaseRef);
         requestFilterChain.proceed(task, actionName, request, ActionListener.runBefore(listener, releaseRef::close));
     }
@@ -124,6 +127,7 @@ public abstract class TransportAction<Request extends ActionRequest, Response ex
             this.releaseRef = releaseRef;
         }
 
+        // 先按顺序执行 action filters
         @Override
         public void proceed(Task task, String actionName, Request request, ActionListener<Response> listener) {
             int i = index.getAndIncrement();

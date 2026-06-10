@@ -1934,8 +1934,8 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
         @Nullable final String translogUUID,
         @Nullable final ChannelFactory factory
     ) throws IOException {
-        IOUtils.rm(location);
-        Files.createDirectories(location);
+        IOUtils.rm(location);   // 删除旧 translog 目录（如果有）
+        Files.createDirectories(location); // 创建新目录
 
         final long generation = 1L;
         final long minTranslogGeneration = 1L;

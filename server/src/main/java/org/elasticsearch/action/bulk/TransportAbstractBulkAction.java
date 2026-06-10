@@ -112,7 +112,7 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
          */
         final int indexingOps = bulkRequest.numberOfActions();
         final long indexingBytes = bulkRequest.ramBytesUsed();
-        final boolean isOnlySystem = TransportBulkAction.isOnlySystem(
+        final boolean isOnlySystem = TransportBulkAction.isOnlySystem( // 是否只写系统索引
             bulkRequest,
             clusterService.state().metadata().getIndicesLookup(),
             systemIndices
@@ -124,7 +124,7 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
             releasable = indexingPressure.markCoordinatingOperationStarted(indexingOps, indexingBytes, isOnlySystem);
         }
         final ActionListener<BulkResponse> releasingListener = ActionListener.runBefore(listener, releasable::close);
-        final Executor executor = isOnlySystem ? systemWriteExecutor : writeExecutor;
+        final Executor executor = isOnlySystem ? systemWriteExecutor : writeExecutor; // 选择执行线程池
         ensureClusterStateThenForkAndExecute(task, bulkRequest, executor, releasingListener);
     }
 
@@ -136,7 +136,7 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
     ) {
         final ClusterState initialState = clusterService.state();
         final ClusterBlockException blockException = initialState.blocks().globalBlockedException(ClusterBlockLevel.WRITE);
-        if (blockException != null) {
+        if (blockException != null) { // 集群是否可写
             if (false == blockException.retryable()) {
                 releasingListener.onFailure(blockException);
                 return;
@@ -171,7 +171,7 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
     }
 
     private void forkAndExecute(Task task, BulkRequest bulkRequest, Executor executor, ActionListener<BulkResponse> releasingListener) {
-        executor.execute(new ActionRunnable<>(releasingListener) {
+        executor.execute(new ActionRunnable<>(releasingListener) { // 切换到线程池处理写入请求
             @Override
             protected void doRun() throws IOException {
                 applyPipelinesAndDoInternalExecute(task, bulkRequest, executor, releasingListener);

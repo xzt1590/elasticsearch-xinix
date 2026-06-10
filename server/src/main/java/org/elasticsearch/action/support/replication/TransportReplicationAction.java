@@ -210,6 +210,7 @@ public abstract class TransportReplicationAction<
             case RejectOnOverload -> false;
         };
 
+        // 协调节点发送过来的请求在这里注册接收，会再走一遍ReroutePhase
         transportService.registerRequestHandler(
             actionName,
             EsExecutors.DIRECT_EXECUTOR_SERVICE,
@@ -217,6 +218,7 @@ public abstract class TransportReplicationAction<
             this::handleOperationRequest
         );
 
+        // 本地的节点直接执行
         transportService.registerRequestHandler(
             transportPrimaryAction,
             executor,
@@ -288,6 +290,7 @@ public abstract class TransportReplicationAction<
 
     /**
      * Primary operation on node with primary copy.
+     * 主链路真正从基类切到具体写入实现
      *
      * @param shardRequest the request to the primary shard
      * @param primary      the primary shard to perform the operation on
@@ -437,6 +440,7 @@ public abstract class TransportReplicationAction<
                 );
             }
 
+            // 允许你在这个 primary shard 上执行一次主分片操作的运行时许可
             acquirePrimaryOperationPermit(
                 indexShard,
                 primaryRequest.getRequest(),
@@ -461,7 +465,7 @@ public abstract class TransportReplicationAction<
                     throw blockException;
                 }
 
-                if (primaryShardReference.isRelocated()) {
+                if (primaryShardReference.isRelocated()) { // 如果分片正在relocation，转发给target的目标
                     primaryShardReference.close(); // release shard operation lock as soon as possible
                     setPhase(replicationTask, "primary_delegation");
                     // delegate primary phase to relocation target
@@ -524,9 +528,10 @@ public abstract class TransportReplicationAction<
                         onCompletionListener.onResponse(response);
                     }, e -> handleException(primaryShardReference, e));
 
+                    // 真正启动复制框架的地方，主链路切换的核心部分
                     new ReplicationOperation<>(
                         primaryRequest.getRequest(),
-                        primaryShardReference,
+                        primaryShardReference, // 后续会在这个类的perform函数中执行
                         responseListener.map(result -> result.replicationResponse),
                         newReplicasProxy(),
                         logger,
@@ -819,10 +824,15 @@ public abstract class TransportReplicationAction<
             finishWithUnexpectedFailure(e);
         }
 
+        // 这里会被执行两次，协调节点一次，数据节点一次。如果协调节点和数据节点都在一个节点上，就只会执行一次
         @Override
         protected void doRun() {
+            // 在真正进入 primary 分片执行之前，负责“找 primary、确认能不能写、必要时重试、然后把请求送到 primary”的协调阶段
+
+            // 标记当前阶段是 routing
             setPhase(task, "routing");
             final ClusterState state = observer.setAndGetObservedState();
+            // replication 路由层的 block 检查
             final ClusterBlockException blockException = blockExceptions(state, request.shardId().getIndexName());
             if (blockException != null) {
                 if (blockException.retryable()) {
@@ -836,6 +846,7 @@ public abstract class TransportReplicationAction<
                 if (indexMetadata == null) {
                     // ensure that the cluster state on the node is at least as high as the node that decided that the index was there
                     if (state.version() < request.routedBasedOnClusterVersion()) {
+                        // 这里是为了确保上一个节点传过来的version比当前小
                         logger.trace(
                             "failed to find index [{}] for request [{}] despite sender thinking it would be here. "
                                 + "Local cluster state version [{}]] is older than on sending node (version [{}]), scheduling a retry...",
@@ -901,9 +912,11 @@ public abstract class TransportReplicationAction<
                     return;
                 }
                 final DiscoveryNode node = state.nodes().get(primary.currentNodeId());
+                // 真正发送到数据节点的地方，如果本身是数据节点，直接本地执行
                 if (primary.currentNodeId().equals(state.nodes().getLocalNodeId())) {
                     performLocalAction(state, primary, node, indexMetadata);
                 } else {
+                    // 发送到数据节点
                     performRemoteAction(state, primary, node);
                 }
             }
@@ -980,6 +993,7 @@ public abstract class TransportReplicationAction<
             final boolean isPrimaryAction,
             final TransportRequest requestToPerform
         ) {
+            // 真正发送请求到数据节点执行
             transportService.sendRequest(node, action, requestToPerform, transportOptions, new TransportResponseHandler<Response>() {
 
                 @Override
@@ -1155,6 +1169,7 @@ public abstract class TransportReplicationAction<
             }
         }
 
+        // 主链路
         @Override
         public void perform(Request request, ActionListener<PrimaryResult<ReplicaRequest, Response>> listener) {
             if (Assertions.ENABLED) {

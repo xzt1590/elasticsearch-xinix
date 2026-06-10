@@ -394,6 +394,7 @@ public class RestController implements HttpServerTransport.Dispatcher {
         MethodHandlers methodHandlers,
         ThreadContext threadContext
     ) throws Exception {
+        // === 第一部分：Content-Type 校验 ===
         if (request.hasContent()) {
             if (isContentTypeDisallowed(request) || handler.mediaTypesValid(request) == false) {
                 sendContentTypeErrorMessage(request.getAllHeaderValues("Content-Type"), channel);
@@ -414,6 +415,7 @@ public class RestController implements HttpServerTransport.Dispatcher {
                 return;
             }
         }
+        // === 第二部分：Serverless 权限检查（云托管版用）===
         RestChannel responseChannel = channel;
         if (apiProtections.isEnabled()) {
             Scope scope = handler.getServerlessScope();
@@ -424,16 +426,20 @@ public class RestController implements HttpServerTransport.Dispatcher {
         }
         // TODO: estimate streamed content size for circuit breaker,
         // something like http_max_chunk_size * avg_compression_ratio(for compressed content)
+        // === 第三部分：熔断器检查 ===
         final int contentLength = request.isFullContent() ? request.contentLength() : 0;
         try {
+            // 返回true的熔断器会触发熔断检查
             if (handler.canTripCircuitBreaker()) {
                 inFlightRequestsBreaker(circuitBreakerService).addEstimateBytesAndMaybeBreak(contentLength, "<http_request>");
             } else {
                 inFlightRequestsBreaker(circuitBreakerService).addWithoutBreaking(contentLength);
             }
             // iff we could reserve bytes for the request we need to send the response also over this channel
+            // 包装了Channel的类，响应发送后会释放熔断器预留的内存
             responseChannel = new ResourceHandlingHttpChannel(channel, circuitBreakerService, contentLength, methodHandlers);
 
+            // === 第四部分：系统索引访问控制 ===
             if (handler.allowSystemIndexAccessByDefault() == false) {
                 // The ELASTIC_PRODUCT_ORIGIN_HTTP_HEADER indicates that the request is coming from an Elastic product and
                 // therefore we should allow a subset of external system index access.
@@ -449,6 +455,7 @@ public class RestController implements HttpServerTransport.Dispatcher {
                 threadContext.putHeader(SYSTEM_INDEX_ACCESS_CONTROL_HEADER_KEY, Boolean.TRUE.toString());
             }
 
+            // === 第五部分：Serverless 标记 ===
             if (apiProtections.isEnabled()) {
                 // API protections are only enabled in serverless; therefore we can use this as an indicator to mark the
                 // request as a serverless mode request here, so downstream handlers can use the marker
@@ -456,6 +463,7 @@ public class RestController implements HttpServerTransport.Dispatcher {
                 logger.trace("Marked request for uri [{}] as serverless request", request.uri());
             }
 
+            // === 第六部分：拦截器 + 真正执行 Handler ===
             final var finalChannel = responseChannel;
             this.interceptor.intercept(request, responseChannel, handler.getConcreteRestHandler(), new ActionListener<>() {
                 @Override
@@ -588,6 +596,7 @@ public class RestController implements HttpServerTransport.Dispatcher {
 
     private void tryAllHandlers(final RestRequest request, final RestChannel channel, final ThreadContext threadContext) throws Exception {
         try {
+            // 校验error_trace 参数（如果禁用了详细错误但请求带了这个参数，报错）
             validateErrorTrace(request, channel);
         } catch (IllegalArgumentException e) {
             startTrace(threadContext, channel);
@@ -596,16 +605,20 @@ public class RestController implements HttpServerTransport.Dispatcher {
             return;
         }
 
+        // 获取原始路径，比如 /my_index/_search
         final String rawPath = request.rawPath();
+        // 完整URL，含查询参数
         final String uri = request.uri();
         final RestRequest.Method requestMethod;
 
         RestApiVersion restApiVersion = request.getRestApiVersion();
         try {
             // Resolves the HTTP method and fails if the method is invalid
+            // 获取http方法的类型
             requestMethod = request.method();
             // Loop through all possible handlers, attempting to dispatch the request
             Iterator<MethodHandlers> allHandlers = getAllHandlers(request.params(), rawPath);
+            // 根据 HTTP 方法和 API 版本获取具体的 Handler
             while (allHandlers.hasNext()) {
                 final RestHandler handler;
                 final MethodHandlers handlers = allHandlers.next();

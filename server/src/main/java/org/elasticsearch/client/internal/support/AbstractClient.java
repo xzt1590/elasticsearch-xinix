@@ -137,6 +137,7 @@ public abstract class AbstractClient implements Client {
         ActionListener<Response> listener
     ) {
         try {
+            // NodeClient的子类
             doExecute(action, request, listener);
         } catch (Exception e) {
             assert false : new AssertionError(e);

@@ -101,7 +101,7 @@ public class PeerRecoveryTargetService implements IndexEventListener {
     private final RecoverySettings recoverySettings;
     private final ClusterService clusterService;
     private final SnapshotFilesProvider snapshotFilesProvider;
-
+    // 管理所有正在进行的恢复任务的容器
     private final RecoveriesCollection onGoingRecoveries;
 
     public PeerRecoveryTargetService(
@@ -229,13 +229,14 @@ public class PeerRecoveryTargetService implements IndexEventListener {
     }
 
     public void startRecovery(
-        final IndexShard indexShard,
-        final DiscoveryNode sourceNode,
-        final long clusterStateVersion,
-        final RecoveryListener listener
+        final IndexShard indexShard,    // 要恢复的分片
+        final DiscoveryNode sourceNode, // 主分片所在节点
+        final long clusterStateVersion, // 集群状态版本号
+        final RecoveryListener listener // 完成回调
     ) {
         final Releasable snapshotFileDownloadsPermit = tryAcquireSnapshotDownloadPermits();
         // create a new recovery status, and process...
+        // 注册后返回一个 recoveryId——唯一标识这次恢复，后面所有操作都用这个 ID 来找到对应的恢复上下文。
         final long recoveryId = onGoingRecoveries.startRecovery(
             indexShard,
             sourceNode,
@@ -279,6 +280,7 @@ public class PeerRecoveryTargetService implements IndexEventListener {
             logger.trace("not running recovery with id [{}] - can not find it (probably finished)", recoveryId);
             return;
         }
+        // 从上下文取出需要的对象
         final RecoveryTarget recoveryTarget = recoveryRef.target();
         assert recoveryTarget.sourceNode() != null : "cannot do a recovery without a source node";
         final RecoveryState recoveryState = recoveryTarget.state();
@@ -297,7 +299,7 @@ public class PeerRecoveryTargetService implements IndexEventListener {
             );
         }), onCompletion::close));
 
-        if (indexShard.routingEntry().isPromotableToPrimary() == false) {
+        if (indexShard.routingEntry().isPromotableToPrimary() == false) { // 不可提升为主分片的特殊分支，跳过
             assert preExistingRequest == null;
             assert indexShard.indexSettings().getIndexMetadata().isSearchableSnapshot() == false;
             ActionListener.run(cleanupOnly.map(v -> {
@@ -314,7 +316,7 @@ public class PeerRecoveryTargetService implements IndexEventListener {
             }), indexShard::preRecovery);
             return;
         }
-
+        // stateless primary 的特殊分支，跳过
         if (indexShard.routingEntry().isSearchable() == false && recoveryState.getPrimary()) {
             assert preExistingRequest == null;
             assert indexShard.indexSettings().getIndexMetadata().isSearchableSnapshot() == false;
@@ -386,6 +388,7 @@ public class PeerRecoveryTargetService implements IndexEventListener {
                         // for archives indices mounted as searchable snapshots, we need to call this
                         indexShard.getIndexEventListener().afterFilesRestoredFromRepository(indexShard);
                     }
+                    // 副本先用自己本地磁盘上的 segment + translog 恢复到 global checkpoint 位置。回调 l 会收到 startingSeqNo
                     indexShard.recoverLocallyUpToGlobalCheckpoint(ActionListener.assertOnce(l));
                 })
                 // peer recovery can consume a lot of disk space, so it's worth cleaning up locally ahead of the attempt
@@ -394,7 +397,7 @@ public class PeerRecoveryTargetService implements IndexEventListener {
                 .andThenApply(startingSeqNo -> {
                     Store.MetadataSnapshot snapshot;
                     try {
-                        snapshot = indexShard.snapshotStoreMetadata();
+                        snapshot = indexShard.snapshotStoreMetadata();// 拍摄本地 segment 文件的元数据快照
                     } catch (IOException e) {
                         // We give up on the contents for any checked exception thrown by snapshotStoreMetadata. We don't want to
                         // allow those to bubble up and interrupt recovery because the subsequent recovery attempt is expected
@@ -412,14 +415,14 @@ public class PeerRecoveryTargetService implements IndexEventListener {
                     store.incRef();
                     try {
                         logger.debug(() -> format("cleaning up index directory for %s before recovery", indexShard.shardId()));
-                        store.cleanupAndVerify("cleanup before peer recovery", snapshot);
+                        store.cleanupAndVerify("cleanup before peer recovery", snapshot); // 清理本地目录中不属于最新 commit 的垃圾文件
                     } finally {
                         store.decRef();
                     }
                     return startingSeqNo;
                 })
                 // now construct the start-recovery request
-                .andThenApply(startingSeqNo -> {
+                .andThenApply(startingSeqNo -> { // 构造 StartRecoveryRequest
                     assert startingSeqNo == UNASSIGNED_SEQ_NO || recoveryTarget.state().getStage() == RecoveryState.Stage.TRANSLOG
                         : "unexpected recovery stage [" + recoveryTarget.state().getStage() + "] starting seqno [ " + startingSeqNo + "]";
                     try {
@@ -431,7 +434,7 @@ public class PeerRecoveryTargetService implements IndexEventListener {
                     }
                 })
                 // finally send the start-recovery request
-                .addListener(toSendListener);
+                .addListener(toSendListener); // 步骤链结束，触发之前定义的 toSendListener——通过 Transport 发送请求到主分片节点
         } else {
             toSendListener.onResponse(
                 new StartRecoveryRequestToSend(

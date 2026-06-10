@@ -217,6 +217,7 @@ public abstract class TransportWriteAction<
         executorFunction.apply(executorSelector, primary).execute(new ActionRunnable<>(listener) {
             @Override
             protected void doRun() {
+                // 线程池的变动，把写入请求放到对应的的线程池中
                 dispatchedShardOperationOnPrimary(request, primary, listener);
             }
 

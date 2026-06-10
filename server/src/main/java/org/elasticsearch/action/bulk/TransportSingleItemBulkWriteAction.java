@@ -46,6 +46,7 @@ public abstract class TransportSingleItemBulkWriteAction<
 
     @Override
     protected void doExecute(Task task, final Request request, final ActionListener<Response> listener) {
+        // 从这里开始，单条写入请求完全并入bulk的写入主链路
         bulkAction.execute(task, toSingleItemBulkRequest(request), TransportBulkAction.unwrappingSingleItemBulkResponse(listener));
     }
 

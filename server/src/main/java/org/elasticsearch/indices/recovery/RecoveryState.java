@@ -34,6 +34,7 @@ import java.util.Map;
 
 /**
  * Keeps track of state related to shard recovery.
+ * 保存所有恢复流程中的上下文信息
  */
 public class RecoveryState implements ToXContentFragment, Writeable {
 
@@ -42,21 +43,25 @@ public class RecoveryState implements ToXContentFragment, Writeable {
 
         /**
          * recovery of lucene files, either reusing local ones are copying new ones
+         * lucene文件恢复阶段
          */
         INDEX((byte) 1),
 
         /**
          * potentially running check index
+         * 校验lucene中的索引完整性
          */
         VERIFY_INDEX((byte) 2),
 
         /**
          * starting up the engine, replaying the translog
+         * Translog 回放阶段
          */
         TRANSLOG((byte) 3),
 
         /**
          * performing final task after all translog ops have been done
+         * 收尾阶段，执行translog 回放完成后的最终清理任务，如刷新索引、更新分片状态等。
          */
         FINALIZE((byte) 4),
 
@@ -89,14 +94,14 @@ public class RecoveryState implements ToXContentFragment, Writeable {
         }
     }
 
-    private Stage stage;
+    private Stage stage; // 恢复走到哪个阶段
 
-    private final Index index;
-    private final Translog translog;
-    private final VerifyIndex verifyIndex;
+    private final Index index; // 文件恢复了多少
+    private final Translog translog; // translog回放了多少
+    private final VerifyIndex verifyIndex; // 校验index到哪了
     private final Timer timer;
 
-    private final RecoverySource recoverySource;
+    private final RecoverySource recoverySource; // 恢复的数据来源
     private final ShardId shardId;
     @Nullable
     private final DiscoveryNode sourceNode;

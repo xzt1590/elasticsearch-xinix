@@ -181,6 +181,7 @@ public class TaskManager implements ClusterStateApplier {
     ) {
         final Releasable unregisterChildNode;
         if (request.getParentTask().isSet()) {
+            // 如果有父任务，记录一下父任务的连接
             unregisterChildNode = registerChildConnection(request.getParentTask().getId(), localConnection);
         } else {
             unregisterChildNode = null;
@@ -189,6 +190,9 @@ public class TaskManager implements ClusterStateApplier {
         try (var ignored = threadPool.getThreadContext().newTraceContext()) {
             final Task task;
             try {
+                // 注册一个task，当前类只负责发号调用，实际创建由request的类型决定
+                // 普通task分支放入tasks中
+                // 可取消的task分支放入cancellableTasks中
                 task = register(type, action.actionName, request);
             } catch (TaskCancelledException e) {
                 Releasables.close(unregisterChildNode);
@@ -231,13 +235,14 @@ public class TaskManager implements ClusterStateApplier {
 
     private void registerCancellableTask(Task task, long requestId, boolean traceRequest) {
         CancellableTask cancellableTask = (CancellableTask) task;
+        // 可取消任务的复杂状态并不放在 Task 对象本身里，而是放在这个 holder 里。
         CancellableTaskHolder holder = new CancellableTaskHolder(cancellableTask);
         cancellableTasks.put(task, requestId, holder);
         if (traceRequest) {
             startTrace(threadPool.getThreadContext(), task);
         }
         // Check if this task was banned before we start it.
-        if (task.getParentTaskId().isSet()) {
+        if (task.getParentTaskId().isSet()) { // 如果父任务已被 ban，直接取消这个子任务并注销
             final Ban ban = bannedParents.get(task.getParentTaskId());
             if (ban != null) {
                 try {

@@ -29,6 +29,8 @@ import java.util.function.Supplier;
  * one tries to take action based on the current state but may want to wait for a new state
  * and retry upon failure.
  */
+// 当前本节点已应用 cluster state 的一个时间点视图。
+// 自己并不保存一堆历史快照。它主要只记一个东西：lastObservedVersion
 public class ClusterStateObserver {
 
     protected final Logger logger;

@@ -74,11 +74,11 @@ public abstract class RecoverySource implements Writeable, ToXContentObject {
     }
 
     public enum Type {
-        EMPTY_STORE,
-        EXISTING_STORE,
-        PEER,
-        SNAPSHOT,
-        LOCAL_SHARDS
+        EMPTY_STORE,    // 新创建的索引分片首次分配，磁盘上没有任何数据
+        EXISTING_STORE, // 节点重启后，主分片数据仍在本地磁盘上，直接从本地恢复，仅仅适用于主节点
+        PEER,           // 新副本分配、副本追赶主分片进度、主分片迁移（就是我们之前详细分析的那种）
+        SNAPSHOT,       // 从快照恢复
+        LOCAL_SHARDS    // shrink index操作时，目标索引的分片从同节点上源索引的分片恢复
     }
 
     public abstract Type getType();
