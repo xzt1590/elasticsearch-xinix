@@ -195,6 +195,7 @@ public final class LuceneChangesSnapshot extends SearchBasedChangesSnapshot {
         return newIndexSearcher(engineSearcher).count(rangeQuery(fromSeqNo, toSeqNo, indexVersionCreated));
     }
 
+    // 将每个 Lucene 文档还原为 Translog.Operation
     private Translog.Operation readDocAsOp(int docIndex) throws IOException {
         final LeafReaderContext leaf = parallelArray.leafReaderContexts[docIndex];
         final int segmentDocID = parallelArray.docID[docIndex] - leaf.docBase;
@@ -238,16 +239,16 @@ public final class LuceneChangesSnapshot extends SearchBasedChangesSnapshot {
 
         final Translog.Operation op;
         final boolean isTombstone = parallelArray.isTombStone[docIndex];
-        if (isTombstone && fields.id() == null) {
+        if (isTombstone && fields.id() == null) { // NoOp操作
             op = new Translog.NoOp(seqNo, primaryTerm, fields.source().utf8ToString());
             assert version == 1L : "Noop tombstone should have version 1L; actual version [" + version + "]";
             assert assertDocSoftDeleted(leaf.reader(), segmentDocID) : "Noop but soft_deletes field is not set [" + op + "]";
         } else {
             final String id = fields.id();
-            if (isTombstone) {
+            if (isTombstone) { // 删除操作
                 op = new Translog.Delete(id, seqNo, primaryTerm, version);
                 assert assertDocSoftDeleted(leaf.reader(), segmentDocID) : "Delete op but soft_deletes field is not set [" + op + "]";
-            } else {
+            } else { // 写入/更新操作
                 if (source == null) {
                     // TODO: Callers should ask for the range that source should be retained. Thus we should always
                     // check for the existence source once we make peer-recovery to send ops after the local checkpoint.

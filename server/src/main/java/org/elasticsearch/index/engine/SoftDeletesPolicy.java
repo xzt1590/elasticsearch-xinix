@@ -97,6 +97,12 @@ final class SoftDeletesPolicy {
     /**
      * Returns the min seqno that is retained in the Lucene index.
      * Operations whose seq# is least this value should exist in the Lucene index.
+     * | 因素                        | 含义                                                 |
+     *   |-----------------------------|------------------------------------------------------|
+     *   | Retention Leases            | CCR follower 或 peer recovery 显式要求"别删这之后的" |
+     *   | retentionOperations 配置    | global checkpoint 之前额外保留的操作数（默认 0）     |
+     *   | localCheckpointOfSafeCommit | peer recovery 需要的操作起点                         |
+     *   取三者的最小值，就是保留的下限。
      */
     synchronized long getMinRetainedSeqNo() {
         /*

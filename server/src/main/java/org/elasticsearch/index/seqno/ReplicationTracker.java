@@ -95,6 +95,7 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
     /**
      * The current operation primary term. Management of this value is done through {@link IndexShard} and must only be done when safe. See
      * {@link #setOperationPrimaryTerm(long)}.
+     * 每次 primary shard 切换（故障转移）时 +1。它和 seq_no 组合在一起可以唯一确定一个操作的"身份"——即使 seq_no 相同，不同 primary term 下的操作也是不同的。
      */
     private volatile long operationPrimaryTerm;
 

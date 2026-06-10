@@ -28,6 +28,8 @@ public class LocalCheckpointTracker {
     /**
      * A collection of bit sets representing processed sequence numbers. Each sequence number is mapped to a bit set by dividing by the
      * bit set size.
+     * 一个很巧妙的bitset设计，把一个逻辑上的大 BitSet 分成了多段，每段 1024 位，用完就丢
+     * key代表倍数，BitSet中的offset + key * 1024 = seqNo
      */
     final Map<Long, CountedBitSet> processedSeqNo = new HashMap<>();
 
@@ -82,7 +84,7 @@ public class LocalCheckpointTracker {
      * @return the next assigned sequence number
      */
     public long generateSeqNo() {
-        return nextSeqNo.getAndIncrement();
+        return nextSeqNo.getAndIncrement(); // 一个很简单的AtomicLong每次+1
     }
 
     /**
@@ -116,13 +118,13 @@ public class LocalCheckpointTracker {
         advanceMaxSeqNo(seqNo);
         if (seqNo <= checkPoint.get()) {
             // this is possible during recovery where we might replay an operation that was also replicated
-            return;
+            return; // 已经在 checkpoint 之前了，忽略（重放时可能发生）
         }
         final CountedBitSet bitSet = getBitSetForSeqNo(bitSetMap, seqNo);
         final int offset = seqNoToBitSetOffset(seqNo);
-        bitSet.set(offset);
-        if (seqNo == checkPoint.get() + 1) {
-            updateCheckpoint(checkPoint, bitSetMap);
+        bitSet.set(offset); // 在 bit set 中标记这个 seq_no 已完成
+        if (seqNo == checkPoint.get() + 1) { // 如果恰好是 checkpoint 的下一个
+            updateCheckpoint(checkPoint, bitSetMap); // 尝试推进 checkpoint
         }
     }
 
@@ -202,7 +204,7 @@ public class LocalCheckpointTracker {
             current = bitSetMap.get(++bitSetKey);
         }
         do {
-            checkPoint.incrementAndGet();
+            checkPoint.incrementAndGet(); // checkpoint 一个一个往前推
             /*
              * The checkpoint always falls in the current bit set or we have already cleaned it; if it falls on the last bit of the
              * current bit set, we can clean it.
@@ -213,9 +215,11 @@ public class LocalCheckpointTracker {
                 assert removed == current;
                 current = bitSetMap.get(++bitSetKey);
             }
+            // 如果下一个位置的 bit 也是 1 吗？是就继续推
         } while (current != null && current.get(seqNoToBitSetOffset(checkPoint.get() + 1)));
     }
 
+    // 获取当前BitSet最后一个数字对应的seqNo
     private static long lastSeqNoInBitSet(final long bitSetKey) {
         return (1 + bitSetKey) * BIT_SET_SIZE - 1;
     }

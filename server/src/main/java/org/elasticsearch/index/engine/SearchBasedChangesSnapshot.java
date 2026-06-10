@@ -185,7 +185,7 @@ public abstract class SearchBasedChangesSnapshot implements Translog.Snapshot, C
     protected TopDocs nextTopDocs() throws IOException {
         Query rangeQuery = rangeQuery(Math.max(fromSeqNo, lastSeenSeqNo), toSeqNo, indexVersionCreated);
         SortField sortBySeqNo = new SortField(SeqNoFieldMapper.NAME, SortField.Type.LONG);
-
+        // 结果按 seq_no 升序排列，然后分批读取（默认每批 1024 个）
         TopFieldCollectorManager collectorManager = new TopFieldCollectorManager(
             new Sort(sortBySeqNo),
             searchBatchSize,
@@ -247,6 +247,7 @@ public abstract class SearchBasedChangesSnapshot implements Translog.Snapshot, C
         return new IndexSearcher(Lucene.wrapAllDocsLive(engineSearcher.getDirectoryReader()));
     }
 
+    // 找出 _seq_no 在 [fromSeqNo, toSeqNo] 范围内的所有文档（包括 soft-deleted 的）
     static Query rangeQuery(long fromSeqNo, long toSeqNo, IndexVersion indexVersionCreated) {
         return new BooleanQuery.Builder().add(LongPoint.newRangeQuery(SeqNoFieldMapper.NAME, fromSeqNo, toSeqNo), BooleanClause.Occur.MUST)
             .add(Queries.newNonNestedFilter(indexVersionCreated), BooleanClause.Occur.MUST)
