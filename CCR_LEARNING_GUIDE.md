@@ -47,7 +47,21 @@
   - `server/src/main/java/org/elasticsearch/persistent/PersistentTasksExecutor.java`
   - `server/src/main/java/org/elasticsearch/persistent/AllocatedPersistentTask.java`
 
-### 第 5 课：Remote Cluster 连接机制
+### 第 5 课：Transport Action 框架与继承体系
+
+- ES 中 Action 的本质：统一的 RPC 抽象
+- 完整继承链：TransportAction → HandledTransportAction → TransportMasterNodeAction
+- 每层做了什么：请求校验、传输层注册、Master 路由与重试
+- 常用基类选型：MasterNodeAction、SingleShardAction、ReplicationAction、BroadcastAction
+- 如何实现一个自定义 Action：需要写哪些类、实现哪些方法
+- 代码：
+  - `server/src/main/java/org/elasticsearch/action/support/TransportAction.java`
+  - `server/src/main/java/org/elasticsearch/action/support/HandledTransportAction.java`
+  - `server/src/main/java/org/elasticsearch/action/support/master/TransportMasterNodeAction.java`
+  - `server/src/main/java/org/elasticsearch/action/support/single/shard/TransportSingleShardAction.java`
+  - `server/src/main/java/org/elasticsearch/action/support/replication/TransportReplicationAction.java`
+
+### 第 6 课：Remote Cluster 连接机制
 
 - ES 集群之间如何建立连接
 - Sniff 模式 vs Proxy 模式
@@ -65,14 +79,14 @@
 
 ---
 
-### 第 6 课：CCR 是什么、解决什么问题
+### 第 7 课：CCR 是什么、解决什么问题
 
 - 使用场景：灾备、就近读取、集中报表
 - CCR vs 主副本复制的本质区别
 - Leader/Follower 模型概述
 - 动手：用 REST API 操作一遍完整的 follow 流程
 
-### 第 7 课：插件入口与组件注册
+### 第 8 课：插件入口与组件注册
 
 - `Ccr.java` 逐段解读
 - CCR 注册了哪些组件：Actions、REST handlers、Engine、Repository、PersistentTask
@@ -88,7 +102,7 @@
 
 ---
 
-### 第 8 课：PUT follow 的完整流程
+### 第 9 课：PUT follow 的完整流程
 
 - 用户调用 `PUT /{index}/_ccr/follow` 之后发生了什么
 - `RestPutFollowAction` → `TransportPutFollowAction` 的调用链
@@ -97,7 +111,7 @@
   - `x-pack/plugin/ccr/src/main/java/org/elasticsearch/xpack/ccr/rest/RestPutFollowAction.java`
   - `x-pack/plugin/ccr/src/main/java/org/elasticsearch/xpack/ccr/action/TransportPutFollowAction.java`
 
-### 第 9 课：CcrRepository — 基于 Snapshot/Restore 的数据引导
+### 第 10 课：CcrRepository — 基于 Snapshot/Restore 的数据引导
 
 - 为什么用 snapshot/restore 而不是重放全部 translog
 - `CcrRepository` 如何伪装成一个 Repository
@@ -107,7 +121,7 @@
   - `x-pack/plugin/ccr/src/main/java/org/elasticsearch/xpack/ccr/repository/CcrRepository.java`
   - `x-pack/plugin/ccr/src/main/java/org/elasticsearch/xpack/ccr/repository/CcrRestoreSourceService.java`
 
-### 第 10 课：CcrRepositoryManager 与分片分配
+### 第 11 课：CcrRepositoryManager 与分片分配
 
 - 每个远程集群对应一个内部 CCR Repository
 - `CcrRepositoryManager` 如何监听远程集群配置变化
@@ -124,7 +138,7 @@
 
 ---
 
-### 第 11 课：ShardFollowTasksExecutor — 任务启动与元数据同步
+### 第 12 课：ShardFollowTasksExecutor — 任务启动与元数据同步
 
 - 如何为每个分片创建一个 follow task
 - Mapping/Settings/Aliases 的同步机制
@@ -132,7 +146,7 @@
 - 代码：
   - `x-pack/plugin/ccr/src/main/java/org/elasticsearch/xpack/ccr/action/ShardFollowTasksExecutor.java`
 
-### 第 12 课：ShardFollowNodeTask（上）— 读取循环
+### 第 13 课：ShardFollowNodeTask（上）— 读取循环
 
 - `coordinateReads()`：核心状态机
 - 并发读请求的控制（max concurrent reads）
@@ -142,7 +156,7 @@
   - `x-pack/plugin/ccr/src/main/java/org/elasticsearch/xpack/ccr/action/ShardFollowNodeTask.java`
   - 重点方法：`coordinateReads()`、`sendShardChangesRequest()`
 
-### 第 13 课：ShardFollowNodeTask（中）— 写入循环
+### 第 14 课：ShardFollowNodeTask（中）— 写入循环
 
 - `coordinateWrites()`：缓冲区管理
 - 并发写请求的控制
@@ -152,7 +166,7 @@
   - `x-pack/plugin/ccr/src/main/java/org/elasticsearch/xpack/ccr/action/ShardFollowNodeTask.java`
   - 重点方法：`coordinateWrites()`、`sendBulkShardOperationsRequest()`
 
-### 第 14 课：ShardFollowNodeTask（下）— 异常处理与恢复
+### 第 15 课：ShardFollowNodeTask（下）— 异常处理与恢复
 
 - 可重试异常 vs 致命异常
 - 读失败时的退避重试
@@ -162,7 +176,7 @@
   - `x-pack/plugin/ccr/src/main/java/org/elasticsearch/xpack/ccr/action/ShardFollowNodeTask.java`
   - 重点方法：`handleReadResponse()`、`handleFailure()`
 
-### 第 15 课：ShardChangesAction — Leader 端如何提供数据
+### 第 16 课：ShardChangesAction — Leader 端如何提供数据
 
 - 请求参数：from_seq_no、max_operations、poll_timeout
 - 底层调用 `LuceneChangesSnapshot` 读取操作
@@ -170,7 +184,7 @@
 - 代码：
   - `x-pack/plugin/ccr/src/main/java/org/elasticsearch/xpack/ccr/action/ShardChangesAction.java`
 
-### 第 16 课：BulkShardOperationsAction — Follower 端如何写入
+### 第 17 课：BulkShardOperationsAction — Follower 端如何写入
 
 - 批量写入的事务语义
 - 如何处理操作冲突（乐观锁）
@@ -184,7 +198,7 @@
 
 ---
 
-### 第 17 课：FollowingEngine 的设计
+### 第 18 课：FollowingEngine 的设计
 
 - 为什么 Follower 不能用标准 InternalEngine
 - 关键差异：使用 Leader 的 seq_no 而非自己分配
@@ -200,7 +214,7 @@
 
 ---
 
-### 第 18 课：AutoFollowCoordinator
+### 第 19 课：AutoFollowCoordinator
 
 - 只在 master 节点运行的协调器
 - 如何定期扫描远程集群的索引列表
@@ -209,7 +223,7 @@
 - 代码：
   - `x-pack/plugin/ccr/src/main/java/org/elasticsearch/xpack/ccr/action/AutoFollowCoordinator.java`
 
-### 第 19 课：AutoFollowMetadata
+### 第 20 课：AutoFollowMetadata
 
 - 集群状态中的 auto-follow 元数据结构
 - 已 follow 索引的记录与去重
@@ -223,7 +237,7 @@
 
 ---
 
-### 第 20 课：CcrRetentionLeases — 保证数据不丢
+### 第 21 课：CcrRetentionLeases — 保证数据不丢
 
 - Follower 如何在 Leader 上维护保留租约
 - 续期频率与过期时间
@@ -231,7 +245,7 @@
 - 代码：
   - `x-pack/plugin/ccr/src/main/java/org/elasticsearch/xpack/ccr/CcrRetentionLeases.java`
 
-### 第 21 课：Pause / Resume / Unfollow 生命周期
+### 第 22 课：Pause / Resume / Unfollow 生命周期
 
 - Pause：取消持久化任务但保留 follower 索引状态
 - Resume：重新创建任务，从上次的 global checkpoint 继续
@@ -241,7 +255,7 @@
   - `x-pack/plugin/ccr/src/main/java/org/elasticsearch/xpack/ccr/action/TransportResumeFollowAction.java`
   - `x-pack/plugin/ccr/src/main/java/org/elasticsearch/xpack/ccr/action/TransportUnfollowAction.java`
 
-### 第 22 课：监控与故障排查
+### 第 23 课：监控与故障排查
 
 - `GET /{index}/_ccr/stats` 返回的指标含义
 - 常见异常及处理：leader_global_checkpoint 落后、retention lease 过期、mapping 不兼容
@@ -255,7 +269,7 @@
 
 ---
 
-### 第 23 课：ShardFollowNodeTaskTests 精读
+### 第 24 课：ShardFollowNodeTaskTests 精读
 
 - 测试如何 mock Leader 端行为
 - 典型场景：正常复制、读超时、写失败、缓冲区满
@@ -263,7 +277,7 @@
 - 代码：
   - `x-pack/plugin/ccr/src/test/java/org/elasticsearch/xpack/ccr/action/ShardFollowNodeTaskTests.java`
 
-### 第 24 课：IndexFollowingIT 集成测试
+### 第 25 课：IndexFollowingIT 集成测试
 
 - 端到端流程的测试组织方式
 - 如何在测试中模拟双集群环境
@@ -281,26 +295,27 @@
 - [✅] 第 2 课：Soft Deletes 与历史操作保留
 - [✅] 第 3 课：Retention Lease（保留租约）
 - [✅] 第 4 课：PersistentTasks 框架
-- [✅] 第 5 课：Remote Cluster 连接机制
-- [✅] 第 6 课：CCR 是什么、解决什么问题
-- [✅] 第 7 课：插件入口与组件注册
-- [ ] 第 8 课：PUT follow 的完整流程
-- [ ] 第 9 课：CcrRepository — 基于 Snapshot/Restore 的数据引导
-- [ ] 第 10 课：CcrRepositoryManager 与分片分配
-- [ ] 第 11 课：ShardFollowTasksExecutor — 任务启动与元数据同步
-- [ ] 第 12 课：ShardFollowNodeTask（上）— 读取循环
-- [ ] 第 13 课：ShardFollowNodeTask（中）— 写入循环
-- [ ] 第 14 课：ShardFollowNodeTask（下）— 异常处理与恢复
-- [ ] 第 15 课：ShardChangesAction — Leader 端如何提供数据
-- [ ] 第 16 课：BulkShardOperationsAction — Follower 端如何写入
-- [ ] 第 17 课：FollowingEngine 的设计
-- [ ] 第 18 课：AutoFollowCoordinator
-- [ ] 第 19 课：AutoFollowMetadata
-- [ ] 第 20 课：CcrRetentionLeases — 保证数据不丢
-- [ ] 第 21 课：Pause / Resume / Unfollow 生命周期
-- [ ] 第 22 课：监控与故障排查
-- [ ] 第 23 课：ShardFollowNodeTaskTests 精读
-- [ ] 第 24 课：IndexFollowingIT 集成测试
+- [✅] 第 5 课：Transport Action 框架与继承体系
+- [✅] 第 6 课：Remote Cluster 连接机制
+- [✅] 第 7 课：CCR 是什么、解决什么问题
+- [✅] 第 8 课：插件入口与组件注册
+- [ ] 第 9 课：PUT follow 的完整流程
+- [ ] 第 10 课：CcrRepository — 基于 Snapshot/Restore 的数据引导
+- [ ] 第 11 课：CcrRepositoryManager 与分片分配
+- [ ] 第 12 课：ShardFollowTasksExecutor — 任务启动与元数据同步
+- [ ] 第 13 课：ShardFollowNodeTask（上）— 读取循环
+- [ ] 第 14 课：ShardFollowNodeTask（中）— 写入循环
+- [ ] 第 15 课：ShardFollowNodeTask（下）— 异常处理与恢复
+- [ ] 第 16 课：ShardChangesAction — Leader 端如何提供数据
+- [ ] 第 17 课：BulkShardOperationsAction — Follower 端如何写入
+- [ ] 第 18 课：FollowingEngine 的设计
+- [ ] 第 19 课：AutoFollowCoordinator
+- [ ] 第 20 课：AutoFollowMetadata
+- [ ] 第 21 课：CcrRetentionLeases — 保证数据不丢
+- [ ] 第 22 课：Pause / Resume / Unfollow 生命周期
+- [ ] 第 23 课：监控与故障排查
+- [ ] 第 24 课：ShardFollowNodeTaskTests 精读
+- [ ] 第 25 课：IndexFollowingIT 集成测试
 
 ---
 
