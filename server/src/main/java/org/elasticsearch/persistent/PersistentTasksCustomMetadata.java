@@ -51,6 +51,7 @@ import static org.elasticsearch.xcontent.ConstructingObjectParser.constructorArg
 
 /**
  * A cluster state record that contains a list of all running persistent tasks
+ * 存在 ClusterState 的 Metadata 中，记录所有 persistent task 的信息：
  */
 public final class PersistentTasksCustomMetadata extends AbstractNamedDiffable<Metadata.Custom> implements Metadata.Custom {
 

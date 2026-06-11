@@ -14,6 +14,7 @@ import org.elasticsearch.xcontent.ToXContentObject;
 
 /**
  * Parameters used to start persistent task
+ * 定义你希望持久化到集群的任务参数
  */
 public interface PersistentTaskParams extends VersionedNamedWriteable, ToXContentObject {
 

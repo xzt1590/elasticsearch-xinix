@@ -24,6 +24,7 @@ import java.util.function.Predicate;
 /**
  * An executor of tasks that can survive restart of requesting or executing node.
  * These tasks are using cluster state rather than only transport service to send requests and responses.
+ * 子类必须实现的核心方法
  */
 public abstract class PersistentTasksExecutor<Params extends PersistentTaskParams> {
 
@@ -46,6 +47,7 @@ public abstract class PersistentTasksExecutor<Params extends PersistentTaskParam
      * <p>
      * The default implementation returns the least loaded data node from amongst the collection of candidate nodes
      */
+    // 任务跑在哪个节点？（调度策略）。不重写的话默认实现负载均衡，选择任务数量最少的节点
     public Assignment getAssignment(Params params, Collection<DiscoveryNode> candidateNodes, ClusterState clusterState) {
         DiscoveryNode discoveryNode = selectLeastLoadedNode(clusterState, candidateNodes, DiscoveryNode::canContainData);
         if (discoveryNode == null) {
@@ -117,6 +119,7 @@ public abstract class PersistentTasksExecutor<Params extends PersistentTaskParam
      * NOTE: The nodeOperation has to throw an exception, trigger task.markAsCompleted() or task.completeAndNotifyIfNeeded() methods to
      * indicate that the persistent task has finished.
      */
+    // 任务的实际业务逻辑入口
     protected abstract void nodeOperation(AllocatedPersistentTask task, Params params, @Nullable PersistentTaskState state);
 
     public Executor getExecutor() {

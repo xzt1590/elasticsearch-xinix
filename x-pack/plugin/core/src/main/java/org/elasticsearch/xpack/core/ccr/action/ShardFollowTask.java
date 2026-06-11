@@ -24,7 +24,7 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
-
+// 持久化到集群的任务参数
 public class ShardFollowTask extends ImmutableFollowParameters implements PersistentTaskParams {
 
     public static final String NAME = "xpack/ccr/shard_follow_task";
@@ -142,7 +142,7 @@ public class ShardFollowTask extends ImmutableFollowParameters implements Persis
     }
 
     @Override
-    public String getWriteableName() {
+    public String getWriteableName() { // 必须重写的任务类型名
         return NAME;
     }
 

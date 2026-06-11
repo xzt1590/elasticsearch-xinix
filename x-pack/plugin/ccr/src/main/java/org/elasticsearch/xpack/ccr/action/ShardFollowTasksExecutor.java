@@ -91,7 +91,7 @@ import static org.elasticsearch.core.Strings.format;
 import static org.elasticsearch.xpack.ccr.CcrLicenseChecker.wrapClient;
 import static org.elasticsearch.xpack.ccr.CcrLicenseChecker.wrapRemoteClusterClient;
 import static org.elasticsearch.xpack.ccr.action.TransportResumeFollowAction.extractLeaderShardHistoryUUIDs;
-
+// 自定义Executor，告诉框架怎么执行
 public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<ShardFollowTask> {
 
     private static final Logger logger = LogManager.getLogger(ShardFollowTasksExecutor.class);
@@ -128,6 +128,7 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
 
     private static final Assignment NO_ASSIGNMENT = new Assignment(null, "no nodes found with data and remote cluster client roles");
 
+    // 2. 调度策略：必须选有 data 角色 AND remote_cluster_client 角色的节点
     @Override
     public Assignment getAssignment(
         final ShardFollowTask params,
@@ -146,6 +147,7 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
         }
     }
 
+    // 3. 创建 ShardFollowNodeTask（自定义子类）
     @Override
     protected AllocatedPersistentTask createTask(
         long id,
@@ -587,12 +589,15 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
         void accept(String followerHistoryUUID, long globalCheckpoint, long maxSeqNo);
     }
 
+    // 4. 业务逻辑入口：获取 follower shard 状态，启动复制循环
     @Override
     protected void nodeOperation(final AllocatedPersistentTask task, final ShardFollowTask params, final PersistentTaskState state) {
         Client followerClient = wrapClient(client, params.getHeaders(), clusterService.state());
         ShardFollowNodeTask shardFollowNodeTask = (ShardFollowNodeTask) task;
         logger.info("{} Starting to track leader shard {}", params.getFollowShardId(), params.getLeaderShardId());
 
+        // 获取 follower 的 globalCheckpoint、maxSeqNo
+        // 调用 shardFollowNodeTask.start() 开始拉取循环
         FollowerStatsInfoHandler handler = (followerHistoryUUID, followerGCP, maxSeqNo) -> {
             shardFollowNodeTask.start(followerHistoryUUID, followerGCP, maxSeqNo, followerGCP, maxSeqNo);
         };

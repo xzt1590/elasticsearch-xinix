@@ -42,6 +42,9 @@ import static org.elasticsearch.core.Strings.format;
 /**
  * This component is responsible for coordination of execution of persistent tasks on individual nodes. It runs on all
  * nodes in the cluster and monitors cluster state changes to detect started commands.
+ * 每个节点都运行，实现了 ClusterStateListener，监听 ClusterState 变化
+ *   - 发现有分配给自己的新任务 → 启动它
+ *   - 发现自己运行的任务在 ClusterState 中消失了 → 取消它
  */
 public class PersistentTasksNodeService implements ClusterStateListener {
 
@@ -68,6 +71,7 @@ public class PersistentTasksNodeService implements ClusterStateListener {
         this.nodePersistentTasksExecutor = nodePersistentTasksExecutor;
     }
 
+    // 监听事件变更
     @Override
     public void clusterChanged(ClusterChangedEvent event) {
         if (event.state().blocks().hasGlobalBlock(GatewayService.STATE_NOT_RECOVERED_BLOCK)) {
@@ -113,12 +117,14 @@ public class PersistentTasksNodeService implements ClusterStateListener {
             String localNodeId = event.state().getNodes().getLocalNodeId();
             Set<Long> notVisitedTasks = new HashSet<>(runningTasks.keySet());
             if (tasks != null) {
+                // 遍历 ClusterState 中的所有 persistent task
                 for (PersistentTask<?> taskInProgress : tasks.tasks()) {
+                    // 这个任务分配给我了吗？
                     if (localNodeId.equals(taskInProgress.getExecutorNode())) {
                         Long allocationId = taskInProgress.getAllocationId();
                         AllocatedPersistentTask persistentTask = runningTasks.get(allocationId);
                         if (persistentTask == null) {
-                            // New task - let's start it
+                            // 新分配的任务，启动
                             try {
                                 startTask(taskInProgress);
                             } catch (Exception e) {

@@ -280,7 +280,7 @@
 - [✅] 第 1 课：Sequence Number 与 Checkpoint
 - [✅] 第 2 课：Soft Deletes 与历史操作保留
 - [✅] 第 3 课：Retention Lease（保留租约）
-- [ ] 第 4 课：PersistentTasks 框架
+- [✅] 第 4 课：PersistentTasks 框架
 - [ ] 第 5 课：Remote Cluster 连接机制
 - [ ] 第 6 课：CCR 是什么、解决什么问题
 - [ ] 第 7 课：插件入口与组件注册

@@ -46,6 +46,10 @@ import java.util.stream.Collectors;
 
 /**
  * Component that runs only on the master node and is responsible for assigning running tasks to nodes
+ * 只在 Master 节点运行，职责：
+ *   1. 创建任务：接收请求，调用 executor 决定分配节点，写入 ClusterState
+ *   2. 重分配任务：节点宕机后，发现任务无家可归，重新选节点
+ *   3. 完成任务：收到节点的完成通知，从 ClusterState 中删除任务
  */
 public final class PersistentTasksClusterService implements ClusterStateListener, Closeable {
 
@@ -113,6 +117,7 @@ public final class PersistentTasksClusterService implements ClusterStateListener
         Params taskParams,
         ActionListener<PersistentTask<?>> listener
     ) {
+        // 这是一个 ClusterState 更新任务，提交给 Master 的集群状态更新队列
         submitUnbatchedTask("create persistent task", new ClusterStateUpdateTask() {
             @Override
             public ClusterState execute(ClusterState currentState) {
