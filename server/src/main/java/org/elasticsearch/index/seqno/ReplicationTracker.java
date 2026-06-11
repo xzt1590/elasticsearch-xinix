@@ -64,6 +64,21 @@ import java.util.stream.Stream;
  * shards that are taken into account for the global checkpoint calculation are called the "in-sync shards".
  * <p>
  * The global checkpoint is maintained by the primary shard and is replicated to all the replicas (via {@link GlobalCheckpointSyncAction}).
+ * // ===== Primary 执行的（assert primaryMode） =====
+ *
+ *   addRetentionLease(...)           // primary 上添加租约
+ *   renewRetentionLease(...)         // primary 上续期租约
+ *   removeRetentionLease(...)        // primary 上删除租约
+ *   getRetentionLeases(expireLeases=true)  // primary 上计算过期
+ *   renewPeerRecoveryRetentionLeases()     // primary 为每个 replica 推进 peer recovery 租约
+ *
+ * =====Replica 执行的（assert primaryMode ==false） =====
+ * updateRetentionLeasesOnReplica(...)    // replica 被动接收 primary 同步来的租约集合
+ *
+ * ===== 两者都执行的 =====
+ * getRetentionLeases(expireLeases=false) // 读取当前租约集合，谁都能读
+ * loadRetentionLeases(path)              // 节点启动时从磁盘加载
+ *
  */
 public class ReplicationTracker extends AbstractIndexShardComponent implements LongSupplier {
 
@@ -229,7 +244,8 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
      * expiration of existing retention leases, and then gets all non-expired retention leases tracked on this shard. Note that only the
      * primary shard calculates which leases are expired, and if any have expired, syncs the retention leases to any replicas. If the
      * expire leases parameter is true, this replication tracker must be in primary mode.
-     *
+     * 如果 follower 挂了超过 12 小时没续期，它的租约就过期了，Leader 可能会清理掉它需要的历史操作。
+     * Follower 恢复后发现数据丢失，只能重新 bootstrap。
      * @return the non-expired retention leases
      */
     public synchronized RetentionLeases getRetentionLeases(final boolean expireLeases) {
@@ -263,6 +279,7 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
                         return true;
                     }
                 }
+                // 过期判断
                 return currentTimeMillis - lease.timestamp() > retentionLeaseMillis;
             }));
         final Collection<RetentionLease> expiredLeases = partitionByExpiration.get(true);
@@ -292,7 +309,7 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
 
     /**
      * Adds a new retention lease.
-     *
+     *  创建一个新的租约
      * @param id                      the identifier of the retention lease
      * @param retainingSequenceNumber the retaining sequence number
      * @param source                  the source of the retention lease
@@ -310,10 +327,11 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
         final RetentionLease retentionLease;
         final RetentionLeases currentRetentionLeases;
         synchronized (this) {
+            // 在这里创建租约
             retentionLease = innerAddRetentionLease(id, retainingSequenceNumber, source);
-            currentRetentionLeases = retentionLeases;
+            currentRetentionLeases = retentionLeases; // version + 1
         }
-        onSyncRetentionLeases.accept(currentRetentionLeases, listener);
+        onSyncRetentionLeases.accept(currentRetentionLeases, listener); // 同步到 replica
         return retentionLease;
     }
 
@@ -394,6 +412,7 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
         if (existingRetentionLease == null) {
             throw new RetentionLeaseNotFoundException(id);
         }
+        // 不允许 retainingSequenceNumber 回退
         if (retainingSequenceNumber < existingRetentionLease.retainingSequenceNumber()) {
             assert PEER_RECOVERY_RETENTION_LEASE_SOURCE.equals(source) == false
                 : "renewing peer recovery retention lease ["
@@ -410,6 +429,7 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
             currentTimeMillisSupplier.getAsLong(),
             source
         );
+        // 用新的 retainingSequenceNumber 和当前时间戳替换旧的
         retentionLeases = new RetentionLeases(
             operationPrimaryTerm,
             retentionLeases.version() + 1,
@@ -421,7 +441,7 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
 
     /**
      * Removes an existing retention lease.
-     *
+     * 主动删除，比如 unfollow 时 follower 不再需要保留，会移除租约。
      * @param id       the identifier of the retention lease
      * @param listener the callback when the retention lease is successfully removed and synced to replicas
      */

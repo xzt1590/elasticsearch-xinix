@@ -34,7 +34,7 @@ import java.util.Objects;
  * arrive out of order on the replica, using the version to ensure that older sync requests are rejected.
  */
 public class RetentionLeases implements ToXContentFragment, Writeable {
-
+    // 哪个 primary term 下创建的
     private final long primaryTerm;
 
     /**
@@ -45,7 +45,7 @@ public class RetentionLeases implements ToXContentFragment, Writeable {
     public long primaryTerm() {
         return primaryTerm;
     }
-
+    // 每次增/删/续租时 version+1
     private final long version;
 
     /**
@@ -82,7 +82,7 @@ public class RetentionLeases implements ToXContentFragment, Writeable {
     boolean supersedes(final long primaryTerm, final long version) {
         return this.primaryTerm > primaryTerm || this.primaryTerm == primaryTerm && this.version > version;
     }
-
+    // id → lease 的 map
     private final Map<String, RetentionLease> leases;
 
     /**

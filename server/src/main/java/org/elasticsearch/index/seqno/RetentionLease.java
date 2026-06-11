@@ -28,7 +28,7 @@ import java.util.Objects;
  * number, the timestamp of when the lease was created or renewed, and the source of the retention lease (e.g., "ccr").
  */
 public final class RetentionLease implements ToXContentObject, Writeable {
-
+    // 唯一标识
     private final String id;
 
     /**
@@ -39,7 +39,7 @@ public final class RetentionLease implements ToXContentObject, Writeable {
     public String id() {
         return id;
     }
-
+    // 保留的起始 seq_no
     private final long retainingSequenceNumber;
 
     /**
@@ -51,7 +51,7 @@ public final class RetentionLease implements ToXContentObject, Writeable {
     public long retainingSequenceNumber() {
         return retainingSequenceNumber;
     }
-
+    // 创建/续期时间戳
     private final long timestamp;
 
     /**
@@ -62,7 +62,7 @@ public final class RetentionLease implements ToXContentObject, Writeable {
     public long timestamp() {
         return timestamp;
     }
-
+    // 来源（"ccr" 或 "peer_recovery"）
     private final String source;
 
     /**

@@ -26,7 +26,7 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 public class CcrRetentionLeases {
-
+    // 封装了 CCR 对租约的所有操作
     // this setting is intentionally not registered, it is only used in tests
     public static final Setting<TimeValue> RETENTION_LEASE_RENEW_INTERVAL_SETTING = Setting.timeSetting(
         "index.ccr.retention_lease.renew_interval",
@@ -49,16 +49,17 @@ public class CcrRetentionLeases {
         final Index followerIndex,
         final String remoteClusterAlias,
         final Index leaderIndex
-    ) {
+    ) { // 例如："prod-dc2/orders-follower/abc123-following-dc1/orders/def456"
+        // 每个 follower shard 在 leader 上的租约是唯一的
         return String.format(
             Locale.ROOT,
             "%s/%s/%s-following-%s/%s/%s",
-            localClusterName,
-            followerIndex.getName(),
-            followerIndex.getUUID(),
-            remoteClusterAlias,
-            leaderIndex.getName(),
-            leaderIndex.getUUID()
+            localClusterName,           // follower 集群名
+            followerIndex.getName(),    // follower 索引名
+            followerIndex.getUUID(),    // follower 索引 UUID
+            remoteClusterAlias,         // 远程集群别名
+            leaderIndex.getName(),      // leader 索引名
+            leaderIndex.getUUID()       // leader 索引 UUID
         );
     }
 
@@ -94,6 +95,8 @@ public class CcrRetentionLeases {
      * Asynchronously requests to add a retention lease with the specified retention lease ID on the specified leader shard using the given
      * remote client. Note that this method will return immediately, with the specified listener callback invoked to indicate a response
      * or failure.
+     *
+     *  在leader上创建租约，这是通过 RemoteClusterClient 在 leader 集群上执行的。租约存在于 leader shard 的 ReplicationTracker 中。
      *
      * @param leaderShardId           the leader shard ID
      * @param retentionLeaseId        the retention lease ID
@@ -149,6 +152,7 @@ public class CcrRetentionLeases {
      * Asynchronously requests to renew a retention lease with the specified retention lease ID on the specified leader shard using the
      * given remote client. Note that this method will return immediately, with the specified listener callback invoked to indicate a
      * response or failure.
+     * 租约续期，默认30s续期一次
      *
      * @param leaderShardId           the leader shard ID
      * @param retentionLeaseId        the retention lease ID

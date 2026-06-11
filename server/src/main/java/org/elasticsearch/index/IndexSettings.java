@@ -481,7 +481,7 @@ public final class IndexSettings {
      */
     public static final Setting<TimeValue> INDEX_SOFT_DELETES_RETENTION_LEASE_PERIOD_SETTING = Setting.timeSetting(
         "index.soft_deletes.retention_lease.period",
-        TimeValue.timeValueHours(12),
+        TimeValue.timeValueHours(12), // 租约过期的默认时间是12小时
         TimeValue.ZERO,
         Property.Dynamic,
         Property.IndexScope
