@@ -21,7 +21,7 @@ import static org.elasticsearch.rest.RestRequest.Method.PUT;
 import static org.elasticsearch.rest.RestUtils.getMasterNodeTimeout;
 import static org.elasticsearch.xpack.core.ccr.action.PutFollowAction.INSTANCE;
 import static org.elasticsearch.xpack.core.ccr.action.PutFollowAction.Request;
-
+// 创建 follower + 启动复制
 public class RestPutFollowAction extends BaseRestHandler {
 
     @Override

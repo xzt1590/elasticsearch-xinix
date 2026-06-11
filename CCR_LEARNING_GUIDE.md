@@ -283,7 +283,7 @@
 - [✅] 第 4 课：PersistentTasks 框架
 - [✅] 第 5 课：Remote Cluster 连接机制
 - [✅] 第 6 课：CCR 是什么、解决什么问题
-- [ ] 第 7 课：插件入口与组件注册
+- [✅] 第 7 课：插件入口与组件注册
 - [ ] 第 8 课：PUT follow 的完整流程
 - [ ] 第 9 课：CcrRepository — 基于 Snapshot/Restore 的数据引导
 - [ ] 第 10 课：CcrRepositoryManager 与分片分配

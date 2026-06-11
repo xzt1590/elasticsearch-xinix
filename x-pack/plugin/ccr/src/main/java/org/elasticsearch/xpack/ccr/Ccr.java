@@ -127,7 +127,15 @@ import static org.elasticsearch.xpack.ccr.CcrSettings.CCR_FOLLOWING_INDEX_SETTIN
 import static org.elasticsearch.xpack.core.XPackSettings.CCR_ENABLED_SETTING;
 
 /**
- * Container class for CCR functionality.
+ * Ccr.java 是整个 CCR 功能的"接线板"。它不包含业务逻辑，只负责把各个组件注册到 ES 框架的对应槽位中。
+ * 理解这个文件，就知道 CCR 由哪些部件组成、各自承担什么职责。
+ * | 接口                 | 能注册什么                                                |
+ *   |----------------------|---------------------------------------------------------|
+ *   | ActionPlugin         | Transport Action（集群内 RPC）和 REST Handler（HTTP API） |
+ *   | PersistentTaskPlugin | 持久化任务执行器                                          |
+ *   | EnginePlugin         | 自定义 Lucene 引擎工厂                                    |
+ *   | RepositoryPlugin     | 快照仓库实现                                              |
+ *   | ClusterPlugin        | 分片分配决策器                                            |
  */
 public class Ccr extends Plugin implements ActionPlugin, PersistentTaskPlugin, EnginePlugin, RepositoryPlugin, ClusterPlugin {
 
@@ -170,6 +178,9 @@ public class Ccr extends Plugin implements ActionPlugin, PersistentTaskPlugin, E
         this.ccrLicenseChecker = Objects.requireNonNull(ccrLicenseChecker);
     }
 
+    /**
+     * 节点启动时创建的长期运行组件
+     */
     @Override
     @SuppressWarnings("HiddenField")
     public Collection<?> createComponents(PluginServices services) {
@@ -199,6 +210,7 @@ public class Ccr extends Plugin implements ActionPlugin, PersistentTaskPlugin, E
         );
     }
 
+    // PersistentTask 执行器，它负责每个 follower shard 的复制循环
     @Override
     @SuppressWarnings("HiddenField")
     public List<PersistentTasksExecutor<?>> getPersistentTasksExecutor(
@@ -211,6 +223,9 @@ public class Ccr extends Plugin implements ActionPlugin, PersistentTaskPlugin, E
         return Collections.singletonList(new ShardFollowTasksExecutor(client, threadPool, clusterService, settingsModule));
     }
 
+    /**
+     * 注册各种action
+     */
     public List<ActionHandler<? extends ActionRequest, ? extends ActionResponse>> getActions() {
         var usageAction = new ActionHandler<>(XPackUsageFeatureAction.CCR, CCRUsageTransportAction.class);
         var infoAction = new ActionHandler<>(XPackInfoFeatureAction.CCR, CCRInfoTransportAction.class);
@@ -219,44 +234,63 @@ public class Ccr extends Plugin implements ActionPlugin, PersistentTaskPlugin, E
         }
 
         return Arrays.asList(
-            // internal actions
+            // internal actions - 内部数据传输，不暴露给用户
+            // 将从Leader拉取的操作批量写入Follower shard（Follower本地执行）
             new ActionHandler<>(BulkShardOperationsAction.INSTANCE, TransportBulkShardOperationsAction.class),
+            // 从Leader shard拉取增量操作（Follower → Leader）
             new ActionHandler<>(ShardChangesAction.INSTANCE, ShardChangesAction.TransportAction.class),
+            // 创建内部CCR Repository（Follower本地执行）
             new ActionHandler<>(
                 PutInternalCcrRepositoryAction.INSTANCE,
                 PutInternalCcrRepositoryAction.TransportPutInternalRepositoryAction.class
             ),
+            // 删除内部CCR Repository（Follower本地执行）
             new ActionHandler<>(
                 DeleteInternalCcrRepositoryAction.INSTANCE,
                 DeleteInternalCcrRepositoryAction.TransportDeleteInternalRepositoryAction.class
             ),
+            // Bootstrap时在Leader建立文件恢复会话（Follower → Leader）
             new ActionHandler<>(PutCcrRestoreSessionAction.INTERNAL_INSTANCE, PutCcrRestoreSessionAction.InternalTransportAction.class),
             new ActionHandler<>(PutCcrRestoreSessionAction.INSTANCE, PutCcrRestoreSessionAction.TransportAction.class),
+            // Bootstrap时关闭Leader侧的文件恢复会话（Follower → Leader）
             new ActionHandler<>(ClearCcrRestoreSessionAction.INTERNAL_INSTANCE, ClearCcrRestoreSessionAction.InternalTransportAction.class),
             new ActionHandler<>(ClearCcrRestoreSessionAction.INSTANCE, ClearCcrRestoreSessionAction.TransportAction.class),
+            // Bootstrap时从Leader拉取Lucene文件分块（Follower → Leader）
             new ActionHandler<>(GetCcrRestoreFileChunkAction.INTERNAL_INSTANCE, GetCcrRestoreFileChunkAction.InternalTransportAction.class),
             new ActionHandler<>(GetCcrRestoreFileChunkAction.INSTANCE, GetCcrRestoreFileChunkAction.TransportAction.class),
-            // stats action
+            // stats action - 统计信息查询
+            // 查询单个follow索引各shard的实时复制统计
             new ActionHandler<>(FollowStatsAction.INSTANCE, TransportFollowStatsAction.class),
+            // 查询CCR整体统计（含auto-follow统计）
             new ActionHandler<>(CcrStatsAction.INSTANCE, TransportCcrStatsAction.class),
+            // 查询follow索引的配置参数
             new ActionHandler<>(FollowInfoAction.INSTANCE, TransportFollowInfoAction.class),
-            // follow actions
+            // follow actions - Follow生命周期管理
+            // 创建follower索引并启动复制（Bootstrap + 启动persistent task）
             new ActionHandler<>(PutFollowAction.INSTANCE, TransportPutFollowAction.class),
+            // 恢复已暂停的follow（重新启动persistent task）
             new ActionHandler<>(ResumeFollowAction.INSTANCE, TransportResumeFollowAction.class),
+            // 暂停follow（停止persistent task，保留follower索引）
             new ActionHandler<>(PauseFollowAction.INSTANCE, TransportPauseFollowAction.class),
+            // 彻底解除follow关系（follower变为普通可写索引）
             new ActionHandler<>(UnfollowAction.INSTANCE, TransportUnfollowAction.class),
-            // auto-follow actions
+            // auto-follow actions - 自动Follow规则管理
+            // 删除auto-follow pattern
             new ActionHandler<>(DeleteAutoFollowPatternAction.INSTANCE, TransportDeleteAutoFollowPatternAction.class),
+            // 创建auto-follow pattern（匹配Leader新索引时自动follow）
             new ActionHandler<>(PutAutoFollowPatternAction.INSTANCE, TransportPutAutoFollowPatternAction.class),
+            // 查询auto-follow pattern
             new ActionHandler<>(GetAutoFollowPatternAction.INSTANCE, TransportGetAutoFollowPatternAction.class),
+            // 激活/停用auto-follow pattern
             new ActionHandler<>(ActivateAutoFollowPatternAction.INSTANCE, TransportActivateAutoFollowPatternAction.class),
-            // forget follower action
+            // forget follower action - Leader侧主动清理follower的retention lease
             new ActionHandler<>(ForgetFollowerAction.INSTANCE, TransportForgetFollowerAction.class),
             usageAction,
             infoAction
         );
     }
 
+    // 每个 REST handler 对应一个 Transport Action，就是 HTTP 入口到内部 RPC 的映射
     public List<RestHandler> getRestHandlers(
         Settings unused,
         NamedWriteableRegistry namedWriteableRegistry,
@@ -345,7 +379,8 @@ public class Ccr extends Plugin implements ActionPlugin, PersistentTaskPlugin, E
     /**
      * The optional engine factory for CCR. This method inspects the index settings for the {@link CcrSettings#CCR_FOLLOWING_INDEX_SETTING}
      * setting to determine whether or not the engine implementation should be a following engine.
-     *
+     * ES 打开每个 shard 时会问所有 EnginePlugin："这个索引你要用自定义引擎吗？
+     * 如果 index.xpack.ccr.following_index = true，就用 FollowingEngine（接受 leader 的 seq_no），否则用默认的 InternalEngine。
      * @return the optional engine factory
      */
     public Optional<EngineFactory> getEngineFactory(final IndexSettings indexSettings) {
@@ -356,6 +391,9 @@ public class Ccr extends Plugin implements ActionPlugin, PersistentTaskPlugin, E
         }
     }
 
+    /**
+     * CCR 的所有后台工作（拉取操作、写入操作、auto-follow 扫描）都跑在这个专用线程池里，不会抢占 ES 其他线程池的资源
+     */
     @SuppressWarnings("HiddenField")
     public List<ExecutorBuilder<?>> getExecutorBuilders(Settings settings) {
         return Collections.singletonList(
@@ -370,6 +408,11 @@ public class Ccr extends Plugin implements ActionPlugin, PersistentTaskPlugin, E
         );
     }
 
+    /**
+     * - 注册为内部仓库（用户不可见，不出现在 GET _snapshot 中）
+     * - 类型名 "_ccr_"
+     * - 用于 Bootstrap 阶段：follower 创建时走 snapshot/restore 流程，但实际数据是从 leader 实时拉取的
+     */
     @Override
     public Map<String, Repository.Factory> getInternalRepositories(
         Environment env,
@@ -394,16 +437,26 @@ public class Ccr extends Plugin implements ActionPlugin, PersistentTaskPlugin, E
         }
     }
 
+    /**
+     * 禁止用户手动修改 follower 索引的 mapping
+     */
     @Override
     public Collection<RequestValidators.RequestValidator<PutMappingRequest>> mappingRequestValidators() {
         return Collections.singletonList(CcrRequests.CCR_PUT_MAPPING_REQUEST_VALIDATOR);
     }
 
+    /**
+     * 禁止用户手动修改 follower 索引的 aliases
+     */
     @Override
     public Collection<RequestValidators.RequestValidator<IndicesAliasesRequest>> indicesAliasesRequestValidators() {
         return Collections.singletonList(CcrRequests.CCR_INDICES_ALIASES_REQUEST_VALIDATOR);
     }
 
+    /**
+     * 确保 follower 索引的 primary shard 在 bootstrap 期间只能分配到具有 remote_cluster_client 角色的节点上
+     * 否则无法连接 leader 拉取数据
+     */
     @Override
     public Collection<AllocationDecider> createAllocationDeciders(Settings unused, ClusterSettings clusterSettings) {
         return List.of(new CcrPrimaryFollowerAllocationDecider());

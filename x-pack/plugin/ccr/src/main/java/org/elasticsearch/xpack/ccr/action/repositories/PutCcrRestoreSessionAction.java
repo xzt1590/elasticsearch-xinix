@@ -31,7 +31,7 @@ import org.elasticsearch.transport.TransportService;
 import org.elasticsearch.xpack.ccr.repository.CcrRestoreSourceService;
 
 import java.io.IOException;
-
+// Follower → Leader | Bootstrap 时在 Leader 建立文件恢复会话
 public class PutCcrRestoreSessionAction extends ActionType<PutCcrRestoreSessionAction.PutCcrRestoreSessionResponse> {
 
     public static final PutCcrRestoreSessionAction INTERNAL_INSTANCE = new PutCcrRestoreSessionAction();

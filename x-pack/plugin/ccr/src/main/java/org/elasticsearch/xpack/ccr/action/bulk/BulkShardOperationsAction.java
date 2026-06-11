@@ -7,7 +7,7 @@
 package org.elasticsearch.xpack.ccr.action.bulk;
 
 import org.elasticsearch.action.ActionType;
-
+// Follower 本地     | 将拉取的操作批量写入 Follower shard
 public class BulkShardOperationsAction extends ActionType<BulkShardOperationsResponse> {
 
     public static final BulkShardOperationsAction INSTANCE = new BulkShardOperationsAction();
