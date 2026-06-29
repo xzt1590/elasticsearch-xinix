@@ -104,8 +104,9 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
     private final TimeValue retentionLeaseRenewInterval;
     private volatile TimeValue waitForMetadataTimeOut;
 
+    // 一阶段：构造函数
     public ShardFollowTasksExecutor(Client client, ThreadPool threadPool, ClusterService clusterService, SettingsModule settingsModule) {
-        super(ShardFollowTask.NAME, threadPool.executor(Ccr.CCR_THREAD_POOL_NAME));
+        super(ShardFollowTask.NAME, threadPool.executor(Ccr.CCR_THREAD_POOL_NAME)); // 确定任务名和线程池
         this.client = client;
         this.threadPool = threadPool;
         this.ccrExecutor = getExecutor();
@@ -117,10 +118,14 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
             .addSettingsUpdateConsumer(CcrSettings.CCR_WAIT_FOR_METADATA_TIMEOUT, newVal -> this.waitForMetadataTimeOut = newVal);
     }
 
+    // 二阶段：分配任务前要校验索引主分片状态
     @Override
     public void validate(ShardFollowTask params, ClusterState clusterState) {
+        // 获取索引分布路由表
         final IndexRoutingTable routingTable = clusterState.getRoutingTable().index(params.getFollowShardId().getIndex());
+        // 获取主分片信息
         final ShardRouting primaryShard = routingTable.shard(params.getFollowShardId().id()).primaryShard();
+        // 主分片必须是active状态
         if (primaryShard.active() == false) {
             throw new IllegalArgumentException("The primary shard of a follower index " + primaryShard + " is not active");
         }
@@ -128,13 +133,14 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
 
     private static final Assignment NO_ASSIGNMENT = new Assignment(null, "no nodes found with data and remote cluster client roles");
 
-    // 2. 调度策略：必须选有 data 角色 AND remote_cluster_client 角色的节点
+    // 三阶段：选择task执行的节点（不一定在主节点上），必须选有 data 角色 AND remote_cluster_client 角色的节点
     @Override
     public Assignment getAssignment(
         final ShardFollowTask params,
         Collection<DiscoveryNode> candidateNodes,
         final ClusterState clusterState
     ) {
+        // 选一个满足条件且负载最轻的节点执行任务
         final DiscoveryNode node = selectLeastLoadedNode(
             clusterState,
             candidateNodes,
@@ -147,7 +153,7 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
         }
     }
 
-    // 3. 创建 ShardFollowNodeTask（自定义子类）
+    // 四阶段：创建任务的实例
     @Override
     protected AllocatedPersistentTask createTask(
         long id,
@@ -157,10 +163,14 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
         PersistentTasksCustomMetadata.PersistentTask<ShardFollowTask> taskInProgress,
         Map<String, String> headers
     ) {
+        // 持久化任务中取出参数，这些都是用户PUT Follow传入的配置参数和初始化任务时的参数
         ShardFollowTask params = taskInProgress.getParams();
+        // 包装带有用户信息的客户端，后续写入都用这个用户的权限
         Client followerClient = wrapClient(client, params.getHeaders(), clusterService.state());
+        // 给一个延迟执行的任务，在ccr线程池上执行
         BiConsumer<TimeValue, Runnable> scheduler = (delay, command) -> threadPool.scheduleUnlessShuttingDown(delay, ccrExecutor, command);
 
+        // 从follower 索引取出leader的uuid
         final String recordedLeaderShardHistoryUUID = getLeaderShardHistoryUUID(params);
         return new ShardFollowNodeTask(
             id,
@@ -174,6 +184,7 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
             System::nanoTime
         ) {
 
+            // 更新mapping
             @Override
             protected void innerUpdateMapping(long minRequiredMappingVersion, LongConsumer handler, Consumer<Exception> errorHandler) {
                 final Index followerIndex = params.getFollowShardId().getIndex();
@@ -201,6 +212,7 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
                 }
             }
 
+            // 更新setting
             @Override
             protected void innerUpdateSettings(final LongConsumer finalHandler, final Consumer<Exception> errorHandler) {
                 final Index leaderIndex = params.getLeaderShardId().getIndex();
@@ -260,6 +272,7 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
                 }
             }
 
+            // 同步索引别名
             @Override
             protected void innerUpdateAliases(final LongConsumer handler, final Consumer<Exception> errorHandler) {
                 /*
@@ -422,6 +435,7 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
                 followerClient.admin().indices().open(openIndexRequest, ActionListener.wrap(onResponse, onFailure));
             }
 
+            // 向Follower写数据
             @Override
             protected void innerSendBulkShardOperationsRequest(
                 final String followerHistoryUUID,
@@ -440,6 +454,7 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
                 followerClient.execute(BulkShardOperationsAction.INSTANCE, request, ActionListener.wrap(handler::accept, errorHandler));
             }
 
+            // 从Leader拉取数据
             @Override
             protected void innerSendShardChangesRequest(
                 long from,
@@ -466,6 +481,7 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
                 }
             }
 
+            // 续期保留租约
             @Override
             protected Scheduler.Cancellable scheduleBackgroundRetentionLeaseRenewal(final LongSupplier followerGlobalCheckpoint) {
                 final String retentionLeaseId = CcrRetentionLeases.retentionLeaseId(
@@ -589,23 +605,27 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
         void accept(String followerHistoryUUID, long globalCheckpoint, long maxSeqNo);
     }
 
-    // 4. 业务逻辑入口：获取 follower shard 状态，启动复制循环
+    // 五阶段：获取 follower shard 状态，真正开始执行复制任务
+    // 查出 Follower 分片当前复制到了哪里（globalCheckpoint），然后从那个位置开始启动复制循环。
     @Override
     protected void nodeOperation(final AllocatedPersistentTask task, final ShardFollowTask params, final PersistentTaskState state) {
         Client followerClient = wrapClient(client, params.getHeaders(), clusterService.state());
+        // 向下转型
         ShardFollowNodeTask shardFollowNodeTask = (ShardFollowNodeTask) task;
         logger.info("{} Starting to track leader shard {}", params.getFollowShardId(), params.getLeaderShardId());
 
-        // 获取 follower 的 globalCheckpoint、maxSeqNo
+        // 成功回调，获取 follower 的 globalCheckpoint、maxSeqNo
         // 调用 shardFollowNodeTask.start() 开始拉取循环
         FollowerStatsInfoHandler handler = (followerHistoryUUID, followerGCP, maxSeqNo) -> {
             shardFollowNodeTask.start(followerHistoryUUID, followerGCP, maxSeqNo, followerGCP, maxSeqNo);
         };
+        // 失败回调
         Consumer<Exception> errorHandler = e -> {
             if (shardFollowNodeTask.isStopped()) {
                 return;
             }
 
+            // 判断是否是可重试的错误，比如网络原因等
             if (ShardFollowNodeTask.shouldRetry(e)) {
                 logger.debug(
                     () -> format("failed to fetch follow shard global %s checkpoint and max sequence number", shardFollowNodeTask),
@@ -618,10 +638,12 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
                     shardFollowNodeTask.onFatalFailure(rex);
                 }
             } else {
+                // 标记任务失败
                 shardFollowNodeTask.onFatalFailure(e);
             }
         };
 
+        // 真正发起查询的地方
         fetchFollowerShardInfo(followerClient, params.getFollowShardId(), handler, errorHandler);
     }
 
@@ -632,25 +654,28 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
         final Consumer<Exception> errorHandler
     ) {
         followerClient.admin().indices().stats(new IndicesStatsRequest().indices(shardId.getIndexName()), ActionListener.wrap(r -> {
+            // 查询 Follower 索引的统计信息
             IndexStats indexStats = r.getIndex(shardId.getIndexName());
-            if (indexStats == null) {
+            if (indexStats == null) { // 找不到索引的信息，被删了或者分片未分配
                 IndexMetadata indexMetadata = clusterService.state().metadata().index(shardId.getIndex());
-                if (indexMetadata != null) {
+                if (indexMetadata != null) { // 索引元数据在，分片未分配
                     errorHandler.accept(new ShardNotFoundException(shardId));
-                } else {
+                } else { // 索引被删了
                     errorHandler.accept(new IndexNotFoundException(shardId.getIndex()));
                 }
                 return;
             }
 
+            // 通过分片ID找到要找的这个分片的主分片
             Optional<ShardStats> filteredShardStats = Arrays.stream(indexStats.getShards())
                 .filter(shardStats -> shardStats.getShardRouting().shardId().equals(shardId))
                 .filter(shardStats -> shardStats.getShardRouting().primary())
                 .findAny();
+            // 找到commitStats和seqNoStats
             if (filteredShardStats.isPresent()) {
                 final ShardStats shardStats = filteredShardStats.get();
                 final CommitStats commitStats = shardStats.getCommitStats();
-                if (commitStats == null) {
+                if (commitStats == null) { // 说明分片正在关闭中
                     // If commitStats is null then AlreadyClosedException has been thrown: TransportIndicesStatsAction#shardOperation(...)
                     // AlreadyClosedException will be retried byShardFollowNodeTask.shouldRetry(...)
                     errorHandler.accept(new AlreadyClosedException(shardId + " commit_stats are missing"));
@@ -664,9 +689,11 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
                     return;
                 }
 
+                // 从commit元数据中取出history UUID，GCP 和 maxSeqNo
                 final String historyUUID = commitStats.getUserData().get(Engine.HISTORY_UUID_KEY);
                 final long globalCheckpoint = seqNoStats.getGlobalCheckpoint();
                 final long maxSeqNo = seqNoStats.getMaxSeqNo();
+                // 触发回调，shardFollowNodeTask.start()
                 handler.accept(historyUUID, globalCheckpoint, maxSeqNo);
             } else {
                 errorHandler.accept(new ShardNotFoundException(shardId));

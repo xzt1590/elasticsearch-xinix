@@ -66,6 +66,7 @@ class CcrRepositoryManager extends AbstractLifecycleComponent {
             super(settings);
         }
 
+        // 节点启动时，读取所有的已经配置的远程集群，每个集群都注册一个 CCR 仓库
         void init() {
             Set<String> clusterAliases = getEnabledRemoteClusters(settings);
             for (String clusterAlias : clusterAliases) {
@@ -73,6 +74,7 @@ class CcrRepositoryManager extends AbstractLifecycleComponent {
             }
         }
 
+        // 如果配置被改变，更新远程集群仓库配置
         @Override
         protected void updateRemoteCluster(String clusterAlias, Settings settings) {
             String repositoryName = CcrRepository.NAME_PREFIX + clusterAlias;

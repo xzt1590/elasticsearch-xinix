@@ -301,8 +301,8 @@
 - [✅] 第 8 课：插件入口与组件注册
 - [✅] 第 9 课：PUT follow 的完整流程
 - [✅] 第 10 课：CcrRepository — 基于 Snapshot/Restore 的数据引导
-- [ ] 第 11 课：CcrRepositoryManager 与分片分配
-- [ ] 第 12 课：ShardFollowTasksExecutor — 任务启动与元数据同步
+- [✅] 第 11 课：CcrRepositoryManager 与分片分配
+- [✅] 第 12 课：ShardFollowTasksExecutor — 任务启动与元数据同步
 - [ ] 第 13 课：ShardFollowNodeTask（上）— 读取循环
 - [ ] 第 14 课：ShardFollowNodeTask（中）— 写入循环
 - [ ] 第 15 课：ShardFollowNodeTask（下）— 异常处理与恢复

@@ -64,6 +64,13 @@ import static org.elasticsearch.core.Strings.format;
 /**
  * The node task that fetch the write operations from a leader shard and
  * persists these ops in the follower shard.
+ * 以下六个方法需要重写
+ * 1. 读操作 — 从 Leader 拉取新的写操作（Index、Delete）
+ * 2. 写操作 — 把拉回来的操作写入 Follower 本地分片
+ * 3. 同步 Mapping — Leader 加了新字段，Follower 也要加
+ * 4. 同步 Settings — Leader 改了分片配置，Follower 也要改
+ * 5. 同步 Aliases — Leader 加了别名，Follower 也要加
+ * 6. 续期租约 — 定期告诉 Leader"别删我还没复制到的历史数据"
  */
 public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
 
