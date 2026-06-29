@@ -37,6 +37,8 @@ public class RestPutFollowAction extends BaseRestHandler {
     @Override
     protected RestChannelConsumer prepareRequest(RestRequest restRequest, NodeClient client) throws IOException {
         Request request = createRequest(restRequest);
+        // 这里的NodeClient代表当前节点内部客户端的入口，负责把请求送进Transport/Action框架
+        // 99% 的场景都用这个 Listener，不用自己自定义状态码等
         return channel -> client.execute(INSTANCE, request, new RestToXContentListener<>(channel));
     }
 

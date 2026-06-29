@@ -104,7 +104,7 @@ public class CcrRestoreSourceService extends AbstractLifecycleComponent implemen
                 if (indexShard.state() == IndexShardState.CLOSED) {
                     throw new IndexShardClosedException(indexShard.shardId(), "cannot open ccr restore session if shard closed");
                 }
-                final Engine.IndexCommitRef commitRef = indexShard.acquireSafeIndexCommit();
+                final Engine.IndexCommitRef commitRef = indexShard.acquireSafeIndexCommit(); // 锁住当前lucene文件
                 final Set<String> fileNames = Set.copyOf(commitRef.getIndexCommit().getFileNames());
                 restore = new RestoreSession(sessionUUID, indexShard, commitRef, fileNames, scheduleTimeout(sessionUUID));
                 onGoingRestores.put(sessionUUID, restore);
@@ -113,7 +113,7 @@ public class CcrRestoreSourceService extends AbstractLifecycleComponent implemen
             }
             Store.MetadataSnapshot metadata = restore.getMetadata();
             success = true;
-            return metadata;
+            return metadata; // 返回文件元数据
         } finally {
             if (success == false) {
                 onGoingRestores.remove(sessionUUID);

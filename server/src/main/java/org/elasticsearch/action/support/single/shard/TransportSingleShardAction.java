@@ -50,6 +50,7 @@ import static org.elasticsearch.core.Strings.format;
  * the read operation can be performed on other shard copies. Concrete implementations can provide their own list
  * of candidate shards to try the read operation on.
  */
+// 专门处理"需要路由到特定分片所在节点"的请求
 public abstract class TransportSingleShardAction<Request extends SingleShardRequest<Request>, Response extends ActionResponse> extends
     TransportAction<Request, Response> {
 

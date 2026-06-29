@@ -123,7 +123,9 @@ import static org.elasticsearch.repositories.RepositoryData.MISSING_UUID;
 import static org.elasticsearch.xpack.ccr.CcrRetentionLeases.retentionLeaseId;
 import static org.elasticsearch.xpack.ccr.CcrRetentionLeases.syncAddRetentionLease;
 import static org.elasticsearch.xpack.ccr.CcrRetentionLeases.syncRenewRetentionLease;
-
+// 实现 Repository 接口
+//      → 框架帮你：创建索引、分配分片、触发恢复、追踪进度
+//      → 你只需实现：几个"给我数据"的方法
 /**
  * This repository relies on a remote cluster for Ccr restores. It is read-only so it can only be used to
  * restore shards/indexes that exist on the remote cluster.
@@ -149,6 +151,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
 
     private final CounterMetric throttledTime = new CounterMetric();
 
+    // 它是一个去重器——多个并发调用只实际发一次 RPC，结果共享
     private final SingleResultDeduplicator<ClusterState> csDeduplicator;
 
     public CcrRepository(RepositoryMetadata metadata, Client client, Settings settings, CcrSettings ccrSettings, ThreadPool threadPool) {
@@ -171,6 +174,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
         );
     }
 
+    // ====== 生命周期（必须有，可以为空）======
     @Override
     protected void doStart() {}
 
@@ -193,6 +197,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
         );
     }
 
+    // Q2: 快照基本信息？
     @Override
     public void getSnapshotInfo(
         Collection<SnapshotId> snapshotIds,
@@ -204,7 +209,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
         assert snapshotIds.size() == 1 && SNAPSHOT_ID.equals(snapshotIds.iterator().next())
             : "RemoteClusterRepository only supports " + SNAPSHOT_ID + " as the SnapshotId but saw " + snapshotIds;
         try {
-            csDeduplicator.execute(
+            csDeduplicator.execute( // 如果第一步刚拉过集群状态，这里直接用缓存，不重复发 RPC
                 new ThreadedActionListener<>(threadPool.executor(ThreadPool.Names.SNAPSHOT_META), listener.map(response -> {
                     Snapshot snapshot = new Snapshot(this.metadata.name(), SNAPSHOT_ID);
 
@@ -213,7 +218,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
                     // To prevent attempting to restore an index of a future version, we reject the restore
                     // already when building the snapshot info from newer nodes matching the current index version.
                     IndexVersion maxIndexVersion = response.getNodes().getMaxDataNodeCompatibleIndexVersion();
-                    if (IndexVersion.current().equals(maxIndexVersion)) {
+                    if (IndexVersion.current().equals(maxIndexVersion)) { // 不允许从高版本复制到低版本
                         for (var node : response.nodes()) {
                             if (node.canContainData() && node.getMaxIndexVersion().equals(maxIndexVersion)) {
                                 BuildVersion remoteVersion = node.getBuildVersion();
@@ -231,6 +236,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
                         }
                     }
 
+                    // 通过 consumer.accept(...) 把伪造的 SnapshotInfo 传给框架。
                     Metadata responseMetadata = response.metadata();
                     Map<String, IndexMetadata> indicesMap = responseMetadata.indices();
                     consumer.accept(
@@ -280,12 +286,14 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
         return clusterState.getState().metadata();
     }
 
+    // Q3: 索引结构？框架要拿到索引的完整结构信息（mapping、settings、分片数），用来创建 follower 索引
     @Override
     public IndexMetadata getSnapshotIndexMetaData(RepositoryData repositoryData, SnapshotId snapshotId, IndexId index) {
         assert SNAPSHOT_ID.equals(snapshotId) : "RemoteClusterRepository only supports " + SNAPSHOT_ID + " as the SnapshotId";
         String leaderIndex = index.getName();
         var remoteClient = getRemoteClusterClient();
 
+        // 这里只拉一个索引的元数据，同步阻塞调用
         ClusterStateResponse clusterState = executeRecoveryAction(
             remoteClient,
             ClusterStateAction.REMOTE_TYPE,
@@ -296,11 +304,16 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
         PlainActionFuture<String[]> future = new PlainActionFuture<>();
         IndexMetadata leaderIndexMetadata = clusterState.getState().metadata().index(leaderIndex);
         CcrLicenseChecker.fetchLeaderHistoryUUIDs(remoteClient, leaderIndexMetadata, future::onFailure, future::onResponse);
+        // history UUID 是每个分片独有的标识符，后续增量复制时用来验证"我连接的还是同一个分片，不是重建过的"
         String[] leaderHistoryUUIDs = future.actionGet(ccrSettings.getRecoveryActionTimeout());
 
         IndexMetadata.Builder imdBuilder = IndexMetadata.builder(leaderIndex);
         // Adding the leader index uuid for each shard as custom metadata:
         Map<String, String> customMetadata = new HashMap<>();
+        // 这四个 key-value 很重要——它们被塞进索引元数据的 custom 字段里。当后面 restoreShard() 被调用时，它从索引 settings 里读回这些值，就知道：
+        //  - 去哪个远程集群（remoteClusterAlias）
+        //  - 去哪个索引（leaderIndexName + leaderUUID）
+        //  - 每个分片的 history UUID 是什么
         customMetadata.put(Ccr.CCR_CUSTOM_METADATA_LEADER_INDEX_SHARD_HISTORY_UUIDS, String.join(",", leaderHistoryUUIDs));
         customMetadata.put(Ccr.CCR_CUSTOM_METADATA_LEADER_INDEX_UUID_KEY, leaderIndexMetadata.getIndexUUID());
         customMetadata.put(Ccr.CCR_CUSTOM_METADATA_LEADER_INDEX_NAME_KEY, leaderIndexMetadata.getIndex().getName());
@@ -314,39 +327,43 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
         imdBuilder.setRoutingNumShards(leaderIndexMetadata.getRoutingNumShards());
         // We assert that insync allocation ids are not empty in `PrimaryShardAllocator`
         for (var key : leaderIndexMetadata.getInSyncAllocationIds().keySet()) {
+            // 这里填一个假值 "ccr_restore"，目的是骗过分片分配器——如果这个字段为空，框架认为"这个分片没有有效副本，不能分配"，restore 就无法继续。
             imdBuilder.putInSyncAllocationIds(key, Collections.singleton(IN_SYNC_ALLOCATION_ID));
         }
 
         return imdBuilder.build();
     }
 
+    // Q1: 你有什么快照？
     @Override
     public void getRepositoryData(Executor responseExecutor, ActionListener<RepositoryData> listener) {
         try {
             csDeduplicator.execute(new ThreadedActionListener<>(responseExecutor, listener.map(response -> {
+                // response 是从 Leader 拿到的集群状态
                 final Metadata remoteMetadata = response.getMetadata();
                 final String[] concreteAllIndices = remoteMetadata.getConcreteAllIndices();
                 final Map<String, SnapshotId> copiedSnapshotIds = Maps.newMapWithExpectedSize(concreteAllIndices.length);
                 final Map<String, RepositoryData.SnapshotDetails> snapshotsDetails = Maps.newMapWithExpectedSize(concreteAllIndices.length);
                 final Map<IndexId, List<SnapshotId>> indexSnapshots = Maps.newMapWithExpectedSize(concreteAllIndices.length);
                 final Map<String, IndexMetadata> remoteIndices = remoteMetadata.getIndices();
-                for (String indexName : concreteAllIndices) {
+                for (String indexName : concreteAllIndices) { // 把每个索引都对应到一个叫 _latest_ 的快照
                     // Both the Snapshot name and UUID are set to _latest_
                     final SnapshotId snapshotId = new SnapshotId(LATEST, LATEST);
                     copiedSnapshotIds.put(indexName, snapshotId);
                     final long nowMillis = threadPool.absoluteTimeInMillis();
-                    snapshotsDetails.put(
+                    snapshotsDetails.put( // 伪造快照详情：状态 SUCCESS、版本是当前版本、时间是现在
                         indexName,
                         new RepositoryData.SnapshotDetails(SnapshotState.SUCCESS, IndexVersion.current(), nowMillis, nowMillis, "")
                     );
+                    // 建立"索引 → 快照"的映射。IndexId 里用了 leader 索引的真实 UUID（不是伪造的），这样后面框架用这个 IndexId 问其他方法时，能对应到正确的 leader 索引。
                     indexSnapshots.put(new IndexId(indexName, remoteIndices.get(indexName).getIndex().getUUID()), List.of(snapshotId));
                 }
                 return new RepositoryData(
-                    MISSING_UUID,
-                    1,
-                    copiedSnapshotIds,
-                    snapshotsDetails,
-                    indexSnapshots,
+                    MISSING_UUID,// 仓库没有真实UUID
+                    1,  //  generation = 1
+                    copiedSnapshotIds, // 快照ID映射
+                    snapshotsDetails, // 快照详情
+                    indexSnapshots,     // 索引→快照映射
                     ShardGenerations.EMPTY,
                     IndexMetaDataGenerations.EMPTY,
                     MISSING_UUID
@@ -407,6 +424,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
         throw new UnsupportedOperationException("Unsupported for repository of type: " + TYPE);
     }
 
+    // Q5: 搬数据！（核心）
     @Override
     public void restoreShard(
         Store store,
@@ -419,6 +437,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
         final ShardId shardId = store.shardId();
         final LinkedList<Closeable> toClose = new LinkedList<>();
         ActionListener.run(listener, restoreShardListener -> {
+            // 错误处理包装
             final ActionListener<Void> restoreListener = ActionListener.runBefore(
                 restoreShardListener.delegateResponse(
                     (l, e) -> l.onFailure(
@@ -428,8 +447,10 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
                 () -> IOUtils.close(toClose)
             );
             // TODO: Add timeouts to network calls / the restore process.
+            // 清空本地的lucene文件
             createEmptyStore(store);
 
+            // 从元数据读取leader的信息，第三步获取的信息
             final Map<String, String> ccrMetadata = store.indexSettings().getIndexMetadata().getCustomData(Ccr.CCR_CUSTOM_METADATA_KEY);
             final String leaderIndexName = ccrMetadata.get(Ccr.CCR_CUSTOM_METADATA_LEADER_INDEX_NAME_KEY);
             final String leaderUUID = ccrMetadata.get(Ccr.CCR_CUSTOM_METADATA_LEADER_INDEX_UUID_KEY);
@@ -438,16 +459,18 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
 
             final var remoteClient = getRemoteClusterClient();
 
+            // 生成租约的唯一标识符
             final String retentionLeaseId = retentionLeaseId(localClusterName, shardId.getIndex(), remoteClusterAlias, leaderIndex);
 
             acquireRetentionLeaseOnLeader(shardId, retentionLeaseId, leaderShardId, remoteClient);
 
             // schedule renewals to run during the restore
+            // 启动 lease 定期续期
             final Scheduler.Cancellable renewable = threadPool.scheduleWithFixedDelay(() -> {
                 logger.trace("{} background renewal of retention lease [{}] during restore", shardId, retentionLeaseId);
                 try (var ignore = threadPool.getThreadContext().newEmptySystemContext()) {
                     // we have to execute under the system context so that if security is enabled the renewal is authorized
-                    CcrRetentionLeases.asyncRenewRetentionLease(
+                    CcrRetentionLeases.asyncRenewRetentionLease( // 每 30s 续期一次
                         leaderShardId,
                         retentionLeaseId,
                         RETAIN_ALL,
@@ -480,11 +503,19 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
             // response, we should be able to retry by creating a new session.
             ActionListener<RestoreSession> sessionListener = restoreListener.delegateFailureAndWrap(
                 // Some tests depend on closing session before cancelling retention lease renewal.
+                    // 会话打开后拉取文件
                 (l1, restoreSession) -> restoreSession.restoreFiles(store, new ActionListener<>() {
                     @Override
                     public void onResponse(Void unused) {
                         logger.trace("[{}] completed CCR restore", shardId);
+                        // 同步mappings，因为文件同步完之后，mapping可能会更新
                         updateMappings(remoteClient, leaderIndex, restoreSession.mappingVersion, client, shardId.getIndex());
+                        // 关闭会话
+                        // Leader 收到后（CcrRestoreSourceService.closeSession()）：
+                        //  1. 从 onGoingRestores map 移除
+                        //  2. 取消超时定时器
+                        //  3. 关闭所有缓存的 IndexInput
+                        //  4. 释放 IndexCommitRef（解锁 Lucene 文件，merge 可以继续）
                         restoreSession.close(l1);
                     }
 
@@ -494,6 +525,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
                     }
                 })
             );
+            // 先看这里，打开文件会话，成功后回调 sessionListener
             openSession(metadata.name(), remoteClient, leaderShardId, shardId, recoveryState, sessionListener);
         });
     }
@@ -517,6 +549,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
     ) {
         logger.trace(() -> format("%s requesting leader to add retention lease [%s]", shardId, retentionLeaseId));
         final TimeValue timeout = ccrSettings.getRecoveryActionTimeout();
+        // 第一次尝试：添加 lease
         final Optional<RetentionLeaseAlreadyExistsException> maybeAddAlready = syncAddRetentionLease(
             leaderShardId,
             retentionLeaseId,
@@ -524,6 +557,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
             remoteClient,
             timeout
         );
+        // 已存在 → 尝试续期
         maybeAddAlready.ifPresent(addAlready -> {
             logger.trace(
                 () -> format("%s retention lease [%s] already exists, requesting a renewal", shardId, retentionLeaseId),
@@ -536,6 +570,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
                 remoteClient,
                 timeout
             );
+            // 续期时不存在了（刚好过期）→ 再添加一次
             maybeRenewNotFound.ifPresent(renewNotFound -> {
                 logger.trace(
                     () -> format(
@@ -566,6 +601,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
 
     private static final ShardGeneration DUMMY_GENERATION = new ShardGeneration("");
 
+    // Q4: 分片多大？获取具体的分片信息
     @Override
     public IndexShardSnapshotStatus.Copy getShardSnapshotStatus(SnapshotId snapshotId, IndexId index, ShardId shardId) {
         assert SNAPSHOT_ID.equals(snapshotId) : "RemoteClusterRepository only supports " + SNAPSHOT_ID + " as the SnapshotId";
@@ -659,7 +695,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
                 leaderShardId
             )
         );
-        remoteClient.execute(
+        remoteClient.execute( // 然后leader接收到请求后，代码进入到Store.MetadataSnapshot openSession(String sessionUUID, IndexShard indexShard)
             PutCcrRestoreSessionAction.REMOTE_INTERNAL_TYPE,
             new PutCcrRestoreSessionRequest(sessionUUID, leaderShardId),
             ListenerTimeouts.wrapWithTimeout(
@@ -724,10 +760,16 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
             restore(snapshotFiles, store, listener);
         }
 
+        // restore函数后面会回调到这里
         @Override
         protected void restoreFiles(List<FileInfo> filesToRecover, Store store, ActionListener<Void> allFilesListener) {
             logger.trace("[{}] starting CCR restore of {} files", shardId, filesToRecover);
             final List<StoreFileMetadata> mds = filesToRecover.stream().map(FileInfo::metadata).collect(Collectors.toList());
+            // MultiChunkTransfer 是 ES 框架提供的并发分块传输工具。你只需要告诉它：
+            //  - 有哪些文件要传（mds）
+            //  - 最多同时传几块（5）
+            //  - 怎么构造每块请求
+            //  - 怎么执行每块请求
             final MultiChunkTransfer<StoreFileMetadata, FileChunk> multiFileTransfer = new MultiChunkTransfer<>(
                 logger,
                 threadPool.getThreadContext(),
@@ -736,6 +778,7 @@ public class CcrRepository extends AbstractLifecycleComponent implements Reposit
                 mds
             ) {
 
+                // MultiFileWriter 也是 ES 框架提供的——把字节写入本地 Lucene 目录
                 final MultiFileWriter multiFileWriter = new MultiFileWriter(store, recoveryState.getIndex(), "", logger);
                 long offset = 0;
 

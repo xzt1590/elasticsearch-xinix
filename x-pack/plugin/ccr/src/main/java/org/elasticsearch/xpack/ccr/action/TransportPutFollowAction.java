@@ -104,19 +104,21 @@ public final class TransportPutFollowAction extends TransportMasterNodeAction<Pu
         final ClusterState state,
         final ActionListener<PutFollowAction.Response> listener
     ) {
+        // 检查许可证
         if (ccrLicenseChecker.isCcrAllowed() == false) {
             listener.onFailure(LicenseUtils.newComplianceException("ccr"));
             return;
         }
         String remoteCluster = request.getRemoteCluster();
-        // Validates whether the leader cluster has been configured properly:
+        // 验证远程集群能否正确连接
         client.getRemoteClusterClient(
-            remoteCluster,
-            remoteClientResponseExecutor,
-            RemoteClusterService.DisconnectedStrategy.RECONNECT_IF_DISCONNECTED
+            remoteCluster, // 远程集群名
+            remoteClientResponseExecutor, // 远程请求响应使用哪个线程池处理回调
+            RemoteClusterService.DisconnectedStrategy.RECONNECT_IF_DISCONNECTED // 断联后的操作，创建 follower 前必须确认 leader 集群可访问，宁愿重连也不能直接失败
         );
 
         String leaderIndex = request.getLeaderIndex();
+        // 核心：检查 leader 端许可证 + 拉取 leader 索引的元数据 + history UUID
         ccrLicenseChecker.checkRemoteClusterLicenseAndFetchLeaderIndexMetadataAndHistoryUUIDs(
             client,
             remoteCluster,
@@ -132,16 +134,18 @@ public final class TransportPutFollowAction extends TransportMasterNodeAction<Pu
         final PutFollowAction.Request request,
         final ActionListener<PutFollowAction.Response> listener
     ) {
-        if (leaderIndexMetadata == null) {
+        if (leaderIndexMetadata == null) { // 索引必须存在
             listener.onFailure(new IllegalArgumentException("leader index [" + request.getLeaderIndex() + "] does not exist"));
             return;
         }
+        // 必须开启soft deletes
         if (IndexSettings.INDEX_SOFT_DELETES_SETTING.get(leaderIndexMetadata.getSettings()) == false) {
             listener.onFailure(
                 new IllegalArgumentException("leader index [" + request.getLeaderIndex() + "] does not have soft deletes enabled")
             );
             return;
         }
+        // 不能是 searchable snapshot，这是只读的远程挂载索引，没有本地完整数据
         if (leaderIndexMetadata.isSearchableSnapshot()) {
             listener.onFailure(
                 new IllegalArgumentException(
@@ -153,8 +157,11 @@ public final class TransportPutFollowAction extends TransportMasterNodeAction<Pu
             return;
         }
 
+        // 验证用户提供的setting。用户可以传setting来覆盖leader的部分setting配置
+        // 用户只能覆盖非 replicated 的 settings，比如 number_of_replicas、refresh_interval 等。
         final Settings replicatedRequestSettings = TransportResumeFollowAction.filter(request.getSettings());
         if (replicatedRequestSettings.isEmpty() == false) {
+            // 用户试图覆盖不可修改的 settings → 报错！
             final List<String> unknownKeys = replicatedRequestSettings.keySet()
                 .stream()
                 .filter(s -> indexScopedSettings.get(s) == null)
@@ -178,29 +185,39 @@ public final class TransportPutFollowAction extends TransportMasterNodeAction<Pu
             return;
         }
 
+        // 构造 overrideSettings，覆盖主集群索引的setting
         final Settings overrideSettings = Settings.builder()
             .put(IndexMetadata.SETTING_INDEX_PROVIDED_NAME, request.getFollowerIndex())
             .put(CcrSettings.CCR_FOLLOWING_INDEX_SETTING.getKey(), true)
             .put(request.getSettings())
             .build();
 
+        // 构造 RestoreSnapshotRequest
         final String leaderClusterRepoName = CcrRepository.NAME_PREFIX + request.getRemoteCluster();
         final RestoreSnapshotRequest restoreRequest = new RestoreSnapshotRequest(
             request.masterNodeTimeout(),
-            leaderClusterRepoName,
-            CcrRepository.LATEST
-        ).indices(request.getLeaderIndex())
+            leaderClusterRepoName,  // repository = "_ccr_leader"
+            CcrRepository.LATEST    // snapshot = "_latest_"
+        ).indices(request.getLeaderIndex()) // 恢复哪个索引: "orders"
             .indicesOptions(request.indicesOptions())
-            .renamePattern("^(.*)$")
-            .renameReplacement(Matcher.quoteReplacement(request.getFollowerIndex()))
-            .indexSettings(overrideSettings)
-            .quiet(true);
+            .renamePattern("^(.*)$")    // 匹配所有名字
+            .renameReplacement(Matcher.quoteReplacement(request.getFollowerIndex()))// 重命名为: "orders-follower"
+            .indexSettings(overrideSettings)// 覆盖的 settings
+            .quiet(true);   // 不在集群状态中记录 restore 信息
+        //这就是"伪装成 Snapshot/Restore"的核心——构造了一个看起来完全正常的 restore 请求，但：
+        //  - repository "_ccr_leader" 不是真正的 S3/文件系统仓库，而是 CcrRepository
+        //  - snapshot "_latest_" 不是真正的快照 ID，而是特殊标记，意思是"给我 leader 索引的当前最新状态"
+        //  - renamePattern/Replacement 把 leader 索引名 orders 改成 follower 索引名 orders-follower
 
         final Client clientWithHeaders = CcrLicenseChecker.wrapClient(
             this.client,
             threadPool.getThreadContext().getHeaders(),
             clusterService.state()
         );
+        // 这里的行为是：
+        // 如果收到 失败 → 直接把异常转发给原始 listener（listener.onFailure(e)）
+        // 如果收到 成功 → 执行我给的 lambda
+        // 之所以失败可以直接转发，是因为失败都是exception类型，而成功是有自己的response类型，需要一层中间的转发
         ActionListener<RestoreService.RestoreCompletionResponse> delegatelistener = listener.delegateFailure(
             (delegatedListener, response) -> afterRestoreStarted(clientWithHeaders, request, delegatedListener, response)
         );
@@ -252,9 +269,11 @@ public final class TransportPutFollowAction extends TransportMasterNodeAction<Pu
     ) {
         final ActionListener<PutFollowAction.Response> listener;
         if (ActiveShardCount.NONE.equals(request.waitForActiveShards())) {
+            // 默认不等，立即返回
             originalListener.onResponse(new PutFollowAction.Response(true, false, false));
             listener = new ActionListener<>() {
 
+                // listener 替换成一个"只记日志"的空壳
                 @Override
                 public void onResponse(PutFollowAction.Response response) {
                     logger.debug("put follow {} completed with {}", request, response);
@@ -266,21 +285,24 @@ public final class TransportPutFollowAction extends TransportMasterNodeAction<Pu
                 }
             };
         } else {
+            // 用户要求等，成功了才回复用户
             listener = originalListener;
         }
 
         RestoreClusterStateListener.createAndRegisterListener(
             clusterService,
             response,
+            // restore 全部完成后，这个 lambda 会被调用
             listener.delegateFailure((delegatedListener, restoreSnapshotResponse) -> {
                 RestoreInfo restoreInfo = restoreSnapshotResponse.getRestoreInfo();
                 if (restoreInfo == null) {
-                    // If restoreInfo is null then it is possible there was a master failure during the
-                    // restore.
+                    // 情况1：master 在 restore 过程中挂了，没拿到结果
                     delegatedListener.onResponse(new PutFollowAction.Response(true, false, false));
                 } else if (restoreInfo.failedShards() == 0) {
+                    // 情况2：所有分片都恢复成功 → 进入最后一步，启动复制
                     initiateFollowing(clientWithHeaders, request, delegatedListener);
                 } else {
+                    // 情况3：有分片恢复失败了
                     assert restoreInfo.failedShards() > 0 : "Should have failed shards";
                     delegatedListener.onResponse(new PutFollowAction.Response(true, false, false));
                 }

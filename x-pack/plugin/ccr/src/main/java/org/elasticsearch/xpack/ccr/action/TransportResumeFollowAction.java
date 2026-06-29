@@ -65,7 +65,7 @@ import java.util.Set;
 import java.util.concurrent.Executor;
 
 import static org.elasticsearch.xpack.ccr.Ccr.CCR_THREAD_POOL_NAME;
-
+// "在已有的 follower 索引上启动/重启复制任务"的 Action
 public class TransportResumeFollowAction extends AcknowledgedTransportMasterNodeAction<ResumeFollowAction.Request> {
 
     static final ByteSizeValue DEFAULT_MAX_READ_REQUEST_SIZE = ByteSizeValue.of(32, ByteSizeUnit.MB);
