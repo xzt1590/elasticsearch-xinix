@@ -82,13 +82,13 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
     private final LongSupplier relativeTimeProvider;
 
     private String followerHistoryUUID;
-    private long leaderGlobalCheckpoint;
-    private long leaderMaxSeqNo;
+    private long leaderGlobalCheckpoint;        // leader当前的GCP
+    private long leaderMaxSeqNo;                // leader当前最大的seqNo
     private long leaderMaxSeqNoOfUpdatesOrDeletes = SequenceNumbers.UNASSIGNED_SEQ_NO;
-    private long lastRequestedSeqNo;
-    private long followerGlobalCheckpoint = 0;
-    private long followerMaxSeqNo = 0;
-    private int numOutstandingReads = 0;
+    private long lastRequestedSeqNo;            // 请求的位置（不代表数据已经返回）
+    private long followerGlobalCheckpoint = 0;  // follower的GCP
+    private long followerMaxSeqNo = 0;          // follower当前最大的seqNo
+    private int numOutstandingReads = 0;        // 当前有几个请求发出去还没回来
     private int numOutstandingWrites = 0;
     private long currentMappingVersion = 0;
     private long currentSettingsVersion = 0;
@@ -104,9 +104,11 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
     private long failedWriteRequests = 0;
     private long operationWritten = 0;
     private long lastFetchTime = -1;
+    // 上次没读完的范围，下次优先继续读取
     private final Queue<Tuple<Long, Long>> partialReadRequests = new PriorityQueue<>(Comparator.comparing(Tuple::v1));
+    // 读回来但是还没有写入Follower的操作，放在按照seqNo排序的优先队列中
     private final Queue<Translog.Operation> buffer = new PriorityQueue<>(Comparator.comparing(Translog.Operation::seqNo));
-    private long bufferSizeInBytes = 0;
+    private long bufferSizeInBytes = 0;         // buffer当前的字节数
     private final LinkedHashMap<Long, Tuple<AtomicInteger, ElasticsearchException>> fetchExceptions;
 
     private volatile ElasticsearchException fatalException;
@@ -145,6 +147,7 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
         };
     }
 
+    // 启动流程
     @SuppressWarnings("HiddenField")
     void start(
         final String followerHistoryUUID,
@@ -159,12 +162,14 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
          * lock.
          */
         synchronized (this) {
+            // 1. 初始化所有状态
             this.followerHistoryUUID = followerHistoryUUID;
             this.leaderGlobalCheckpoint = leaderGlobalCheckpoint;
             this.leaderMaxSeqNo = leaderMaxSeqNo;
             this.followerGlobalCheckpoint = followerGlobalCheckpoint;
             this.followerMaxSeqNo = followerMaxSeqNo;
             this.lastRequestedSeqNo = followerGlobalCheckpoint;
+            // 2. 启动租约续期定时器
             renewable = scheduleBackgroundRetentionLeaseRenewal(() -> {
                 synchronized (ShardFollowNodeTask.this) {
                     return this.followerGlobalCheckpoint;
@@ -173,14 +178,17 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
         }
 
         // updates follower mapping, this gets us the leader mapping version and makes sure that leader and follower mapping are identical
+        // 先同步mapping
         updateMapping(0L, leaderMappingVersion -> {
             synchronized (ShardFollowNodeTask.this) {
                 currentMappingVersion = Math.max(currentMappingVersion, leaderMappingVersion);
             }
+            // 再同步setting
             updateSettings(leaderSettingsVersion -> {
                 synchronized (ShardFollowNodeTask.this) {
                     currentSettingsVersion = Math.max(currentSettingsVersion, leaderSettingsVersion);
                 }
+                // 再同步别名
                 updateAliases(leaderAliasesVersion -> {
                     synchronized (ShardFollowNodeTask.this) {
                         currentAliasesVersion = Math.max(currentAliasesVersion, leaderAliasesVersion);
@@ -198,12 +206,14 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
                             currentAliasesVersion
                         );
                     }
+                    // 真正开始读
                     coordinateReads();
                 });
             });
         });
     }
 
+    // 从 leader 读请求的调用中心
     synchronized void coordinateReads() {
         if (isStopped()) {
             LOGGER.info("{} shard follow task has been stopped", params.getFollowShardId());
@@ -218,6 +228,8 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
         );
         assert partialReadRequests.size() <= params.getMaxOutstandingReadRequests()
             : "too many partial read requests [" + partialReadRequests + "]";
+        // 第一部分：优先处理"上次没读完的范围"
+        // 假如你请求"从 seqNo=100 开始读 1000 条"，但 Leader 只返回了 500 条，剩下的会被记录到 partialReadRequests 队列
         while (hasReadBudget() && partialReadRequests.isEmpty() == false) {
             final Tuple<Long, Long> range = partialReadRequests.remove();
             assert range.v1() <= range.v2() && range.v2() <= lastRequestedSeqNo
@@ -237,8 +249,10 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
             sendShardChangesRequest(fromSeqNo, requestOpCount, maxRequiredSeqNo);
         }
         final int maxReadRequestOperationCount = params.getMaxReadRequestOperationCount();
+        // 第二部分：发起新的读请求，追赶 leaderGlobalCheckpoint
         while (hasReadBudget() && lastRequestedSeqNo < leaderGlobalCheckpoint) {
             final long from = lastRequestedSeqNo + 1;
+            // 范围最大maxReadRequestOperationCount
             final long maxRequiredSeqNo = Math.min(leaderGlobalCheckpoint, from + maxReadRequestOperationCount - 1);
             final int requestOpCount;
             if (numOutstandingReads == 0) {
@@ -261,6 +275,7 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
             sendShardChangesRequest(from, requestOpCount, maxRequiredSeqNo);
         }
 
+        // 第三部分：已追上，发一个"探测请求"（长轮询）
         if (numOutstandingReads == 0 && hasReadBudget()) {
             assert lastRequestedSeqNo == leaderGlobalCheckpoint;
             // We sneak peek if there is any thing new in the leader.
@@ -272,6 +287,7 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
         }
     }
 
+    // 三个限制条件：并发数，缓冲区字节数，缓冲区操作数
     private boolean hasReadBudget() {
         assert Thread.holdsLock(this);
         // TODO: To ensure that we never overuse the buffer, we need to
@@ -296,12 +312,15 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
         return true;
     }
 
+    // 写请求的调用中心
     private synchronized void coordinateWrites() {
         if (isStopped()) {
             LOGGER.info("{} shard follow task has been stopped", params.getFollowShardId());
             return;
         }
 
+        // 有写预算且buffer不为空
+        // 这里发送请求也是异步的，所以这个while循环相当于并发执行，里面都是在控制并发数和读取buffer的大小
         while (hasWriteBudget() && buffer.isEmpty() == false) {
             long sumEstimatedSize = 0L;
             int length = Math.min(params.getMaxWriteRequestOperationCount(), buffer.size());
@@ -341,12 +360,15 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
         sendShardChangesRequest(from, maxOperationCount, maxRequiredSeqNo, new AtomicInteger(0));
     }
 
+    // 发送读请求
     private void sendShardChangesRequest(long from, int maxOperationCount, long maxRequiredSeqNo, AtomicInteger retryCounter) {
+        // 记录开始时间
         final long startTime = relativeTimeProvider.getAsLong();
         synchronized (this) {
             lastFetchTime = startTime;
         }
         innerSendShardChangesRequest(from, maxOperationCount, response -> {
+            // 成功回调
             synchronized (ShardFollowNodeTask.this) {
                 // Always clear fetch exceptions:
                 fetchExceptions.remove(from);
@@ -361,12 +383,14 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
             }
             handleReadResponse(from, maxRequiredSeqNo, response);
         }, e -> {
+            // 失败回调
             synchronized (ShardFollowNodeTask.this) {
                 totalReadTimeMillis += TimeUnit.NANOSECONDS.toMillis(relativeTimeProvider.getAsLong() - startTime);
                 failedReadRequests++;
                 fetchExceptions.put(from, Tuple.tuple(retryCounter, ExceptionsHelper.convertToElastic(e)));
             }
             Throwable cause = ExceptionsHelper.unwrapCause(e);
+            // 请求的操作已经被merge了
             if (cause instanceof ResourceNotFoundException resourceNotFoundException) {
                 if (resourceNotFoundException.getMetadataKeys().contains(Ccr.REQUESTED_OPS_MISSING_METADATA_KEY)) {
                     handleFallenBehindLeaderShard(e, from, maxOperationCount, maxRequiredSeqNo, retryCounter);
@@ -381,6 +405,7 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
         // In order to process this read response (3), we need to check and potentially update the follow index's setting (1) and
         // check and potentially update the follow index's mappings (2).
 
+        // 执行顺序从下往上，上一个回调函数作为下一个的参数
         // 4) handle read response:
         Runnable handleResponseTask = () -> innerHandleReadResponse(from, maxRequiredSeqNo, response);
         // 3) update follow index mapping:
@@ -391,6 +416,7 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
         maybeUpdateAliases(response.getAliasesVersion(), updateSettingsTask);
     }
 
+    // 请求的seqNo已经被merge掉了，按理说只能重新bootstrap一遍。但是这里注释显示还是会一直重试，后续需要优化
     void handleFallenBehindLeaderShard(Exception e, long from, int maxOperationCount, long maxRequiredSeqNo, AtomicInteger retryCounter) {
         // Do restore from repository here and after that
         // start() should be invoked and stats should be reset
@@ -410,28 +436,34 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
 
     synchronized void innerHandleReadResponse(long from, long maxRequiredSeqNo, ShardChangesAction.Response response) {
         onOperationsFetched(response.getOperations());
+        // 1. 更新 Leader 的全局状态
         leaderGlobalCheckpoint = Math.max(leaderGlobalCheckpoint, response.getGlobalCheckpoint());
         leaderMaxSeqNo = Math.max(leaderMaxSeqNo, response.getMaxSeqNo());
         leaderMaxSeqNoOfUpdatesOrDeletes = SequenceNumbers.max(leaderMaxSeqNoOfUpdatesOrDeletes, response.getMaxSeqNoOfUpdatesOrDeletes());
         final long newFromSeqNo;
         if (response.getOperations().length == 0) {
+            // 返回空，这段时间内没有新数据，继续发 coordinateReads
             newFromSeqNo = from;
         } else {
             assert response.getOperations()[0].seqNo() == from
                 : "first operation is not what we asked for. From is [" + from + "], got " + response.getOperations()[0];
             List<Translog.Operation> operations = Arrays.asList(response.getOperations());
             long operationsSize = operations.stream().mapToLong(Translog.Operation::estimateSize).sum();
+            // 2. 把操作放入buffer
             buffer.addAll(operations);
             bufferSizeInBytes += operationsSize;
             final long maxSeqNo = response.getOperations()[response.getOperations().length - 1].seqNo();
             assert maxSeqNo == Arrays.stream(response.getOperations()).mapToLong(Translog.Operation::seqNo).max().getAsLong();
             newFromSeqNo = maxSeqNo + 1;
             // update last requested seq no as we may have gotten more than we asked for and we don't want to ask it again.
+            // 3. 更新 lastRequestedSeqNo（可能收到的比请求的多）
             lastRequestedSeqNo = Math.max(lastRequestedSeqNo, maxSeqNo);
             assert lastRequestedSeqNo <= leaderGlobalCheckpoint
                 : "lastRequestedSeqNo [" + lastRequestedSeqNo + "] is larger than the global checkpoint [" + leaderGlobalCheckpoint + "]";
+            // 4. 触发写入
             coordinateWrites();
         }
+        // 5. 如果这次没读完（newFromSeqNo <= maxRequiredSeqNo），记录为 partial
         if (newFromSeqNo <= maxRequiredSeqNo) {
             LOGGER.trace(
                 "{} received [{}] operations, enqueue partial read request [{}/{}]",
@@ -442,10 +474,12 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
             );
             partialReadRequests.add(Tuple.tuple(newFromSeqNo, maxRequiredSeqNo));
         }
+        // 6. 释放一个读请求名额，继续调度
         numOutstandingReads--;
         coordinateReads();
     }
 
+    // 发送写请求
     private void sendBulkShardOperationsRequest(
         List<Translog.Operation> operations,
         long leaderMaxSequenceNoOfUpdatesOrDeletes,
@@ -454,6 +488,7 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
         assert leaderMaxSequenceNoOfUpdatesOrDeletes != SequenceNumbers.UNASSIGNED_SEQ_NO : "mus is not replicated";
         final long startTime = relativeTimeProvider.getAsLong();
         innerSendBulkShardOperationsRequest(followerHistoryUUID, operations, leaderMaxSequenceNoOfUpdatesOrDeletes, response -> {
+            // 成功回调
             synchronized (ShardFollowNodeTask.this) {
                 totalWriteTimeMillis += TimeUnit.NANOSECONDS.toMillis(relativeTimeProvider.getAsLong() - startTime);
                 successfulWriteRequests++;
@@ -461,6 +496,7 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
             }
             handleWriteResponse(response);
         }, e -> {
+            // 失败回调
             synchronized (ShardFollowNodeTask.this) {
                 totalWriteTimeMillis += TimeUnit.NANOSECONDS.toMillis(relativeTimeProvider.getAsLong() - startTime);
                 failedWriteRequests++;
@@ -474,14 +510,17 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
     }
 
     private synchronized void handleWriteResponse(final BulkShardOperationsResponse response) {
+        // 写成功后更新GCP和maxSeqNo
         this.followerGlobalCheckpoint = Math.max(this.followerGlobalCheckpoint, response.getGlobalCheckpoint());
         this.followerMaxSeqNo = Math.max(this.followerMaxSeqNo, response.getMaxSeqNo());
         numOutstandingWrites--;
         assert numOutstandingWrites >= 0;
+        // 继续递归到写请求
         coordinateWrites();
 
         // In case that buffer has more ops than is allowed then reads may all have been stopped,
         // this invocation makes sure that we start a read when there is budget in case no reads are being performed.
+        // 递归到读请求
         coordinateReads();
     }
 
@@ -588,6 +627,7 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
         innerUpdateAliases(handler, e -> handleFailure(e, retryCounter, () -> updateAliases(handler, retryCounter)));
     }
 
+    // 失败处理，要分清可重试和不可重试的
     private void handleFailure(Exception e, AtomicInteger retryCounter, Runnable task) {
         assert e != null;
         if (shouldRetry(e)) {
@@ -595,6 +635,7 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
                 // Only retry is the shard follow task is not stopped.
                 int currentRetry = retryCounter.incrementAndGet();
                 LOGGER.debug(() -> format("%s error during follow shard task, retrying [%s]", params.getFollowShardId(), currentRetry), e);
+                // 指数退避重试
                 long delay = computeDelay(currentRetry, params.getReadPollTimeout().getMillis());
                 scheduler.accept(TimeValue.timeValueMillis(delay), task);
             }
@@ -614,6 +655,7 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
         LOGGER.warn("shard follow task encounter non-retryable error", e);
     }
 
+    // 指数退避重试
     static long computeDelay(int currentRetry, long maxRetryDelayInMillis) {
         // Cap currentRetry to avoid overflow when computing n variable
         int maxCurrentRetry = Math.min(currentRetry, 24);
@@ -630,6 +672,38 @@ public abstract class ShardFollowNodeTask extends AllocatedPersistentTask {
             return true;
         }
 
+        /**
+         * 可重试的（都是暂时性的）：
+         *   ┌─────────────────────────────────┬────────────────────────────────────────────┐
+         *   │            错误类型              │                  典型场景                    │
+         *   ├─────────────────────────────────┼────────────────────────────────────────────┤
+         *   │ 网络连接异常                      │ Leader 暂时不可达                            │
+         *   ├─────────────────────────────────┼────────────────────────────────────────────┤
+         *   │ ShardNotFoundException          │ 分片正在迁移                                 │
+         *   ├─────────────────────────────────┼────────────────────────────────────────────┤
+         *   │ IllegalIndexShardStateException │ 分片正在恢复中                               │
+         *   ├─────────────────────────────────┼────────────────────────────────────────────┤
+         *   │ NoShardAvailableActionException │ 分片暂时没有可用副本                          │
+         *   ├─────────────────────────────────┼────────────────────────────────────────────┤
+         *   │ AlreadyClosedException          │ 分片正在关闭（relocate）                      │
+         *   ├─────────────────────────────────┼────────────────────────────────────────────┤
+         *   │ ElasticsearchSecurityException  │ 权限暂时不可用（证书轮换中）                    │
+         *   ├─────────────────────────────────┼────────────────────────────────────────────┤
+         *   │ ClusterBlockException           │ Leader 索引被临时 block 或无 master           │
+         *   ├─────────────────────────────────┼────────────────────────────────────────────┤
+         *   │ IndexClosedException            │ Follower 索引被关闭（updateSettings 期间）    │
+         *   ├─────────────────────────────────┼────────────────────────────────────────────┤
+         *   │ ConnectTransportException       │ 传输层连接失败                               │
+         *   ├─────────────────────────────────┼────────────────────────────────────────────┤
+         *   │ NodeClosedException             │ 目标节点正在重启                              │
+         *   ├─────────────────────────────────┼────────────────────────────────────────────┤
+         *   │ NoSuchRemoteClusterException    │ 远程集群配置暂时不可用                         │
+         *   ├─────────────────────────────────┼────────────────────────────────────────────┤
+         *   │ EsRejectedExecutionException    │ 线程池满了                                   │
+         *   ├─────────────────────────────────┼────────────────────────────────────────────┤
+         *   │ CircuitBreakingException        │ 内存熔断                                     │
+         *   └─────────────────────────────────┴────────────────────────────────────────────┘
+         */
         final Throwable actual = ExceptionsHelper.unwrapCause(e);
         return actual instanceof ShardNotFoundException
             || actual instanceof IllegalIndexShardStateException

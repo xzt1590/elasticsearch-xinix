@@ -187,9 +187,11 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
             // 更新mapping
             @Override
             protected void innerUpdateMapping(long minRequiredMappingVersion, LongConsumer handler, Consumer<Exception> errorHandler) {
+                // 取出主备的index
                 final Index followerIndex = params.getFollowShardId().getIndex();
                 final Index leaderIndex = params.getLeaderShardId().getIndex();
                 final Supplier<TimeValue> timeout = () -> isStopped() ? TimeValue.MINUS_ONE : waitForMetadataTimeOut;
+                // 从 Leader 拿到 IndexMetadata 后执行的回调
                 final ActionListener<IndexMetadata> listener = ActionListener.wrap(indexMetadata -> {
                     if (indexMetadata.mapping() == null) {
                         assert indexMetadata.getMappingVersion() == 1;
@@ -451,6 +453,7 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
                     operations,
                     maxSeqNoOfUpdatesOrDeletes
                 );
+                // 发出请求，注册回调，不会等待写入完成
                 followerClient.execute(BulkShardOperationsAction.INSTANCE, request, ActionListener.wrap(handler::accept, errorHandler));
             }
 
@@ -484,6 +487,7 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
             // 续期保留租约
             @Override
             protected Scheduler.Cancellable scheduleBackgroundRetentionLeaseRenewal(final LongSupplier followerGlobalCheckpoint) {
+                // 通过这四个参数构造租约ID
                 final String retentionLeaseId = CcrRetentionLeases.retentionLeaseId(
                     clusterService.getClusterName().value(),
                     params.getFollowShardId().getIndex(),
@@ -497,7 +501,10 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
                  * again. If that fails, it had better not be because the retention lease already exists. Either way, we will attempt to
                  * renew again on the next scheduled execution.
                  */
-                final ActionListener<ActionResponse.Empty> listener = ActionListener.wrap(r -> {}, e -> {
+                // 定义续期失败的回调逻辑
+                final ActionListener<ActionResponse.Empty> listener = ActionListener.wrap(
+                        r -> {},  // 续期成功，不做处理
+                        e -> { // 续期失败
                     /*
                      * We have to guard against the possibility that the shard follow node task has been stopped and the retention
                      * lease deliberately removed via the act of unfollowing. Note that the order of operations is important in
@@ -506,13 +513,14 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
                      * unfollow action, then we know that the unfollow action has already stopped the shard follow node task and
                      * there is no race condition with the unfollow action.
                      */
-                    if (isCancelled() || isCompleted()) {
+                    if (isCancelled() || isCompleted()) { // 如果任务已经停止，不做处理
                         return;
                     }
                     final Throwable cause = ExceptionsHelper.unwrapCause(e);
                     logRetentionLeaseFailure(retentionLeaseId, cause);
                     // noinspection StatementWithEmptyBody
                     if (cause instanceof RetentionLeaseNotFoundException) {
+                        // 定义租约如果已经不存在后的行为，可能原因是leader分片重建，租约过期等
                         // note that we do not need to mark as system context here as that is restored from the original renew
                         logger.trace(
                             "{} background adding retention lease [{}] while following",
@@ -528,6 +536,7 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
                                 final Throwable innerCause = ExceptionsHelper.unwrapCause(inner);
                                 logRetentionLeaseFailure(retentionLeaseId, innerCause);
                             });
+                            // 尝试重新添加租约
                             CcrRetentionLeases.asyncAddRetentionLease(
                                 params.getLeaderShardId(),
                                 retentionLeaseId,
@@ -553,7 +562,7 @@ public final class ShardFollowTasksExecutor extends PersistentTasksExecutor<Shar
                     CcrRetentionLeases.asyncRenewRetentionLease(
                         params.getLeaderShardId(),
                         retentionLeaseId,
-                        followerGlobalCheckpoint.getAsLong() + 1,
+                        followerGlobalCheckpoint.getAsLong() + 1, // 更新租约的GCP
                         remoteClient(params),
                         listener
                     );

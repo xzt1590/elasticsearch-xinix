@@ -303,9 +303,9 @@
 - [✅] 第 10 课：CcrRepository — 基于 Snapshot/Restore 的数据引导
 - [✅] 第 11 课：CcrRepositoryManager 与分片分配
 - [✅] 第 12 课：ShardFollowTasksExecutor — 任务启动与元数据同步
-- [ ] 第 13 课：ShardFollowNodeTask（上）— 读取循环
-- [ ] 第 14 课：ShardFollowNodeTask（中）— 写入循环
-- [ ] 第 15 课：ShardFollowNodeTask（下）— 异常处理与恢复
+- [✅] 第 13 课：ShardFollowNodeTask（上）— 读取循环
+- [✅] 第 14 课：ShardFollowNodeTask（中）— 写入循环
+- [✅] 第 15 课：ShardFollowNodeTask（下）— 异常处理与恢复
 - [ ] 第 16 课：ShardChangesAction — Leader 端如何提供数据
 - [ ] 第 17 课：BulkShardOperationsAction — Follower 端如何写入
 - [ ] 第 18 课：FollowingEngine 的设计
